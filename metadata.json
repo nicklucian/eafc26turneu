@@ -1,0 +1,5 @@
+{
+  "name": "FC 26 Tournament Pro",
+  "description": "A comprehensive full-stack management system for EA SPORTS FC 26 private tournaments featuring automated fixtures, standings, statistics, and administrative controls.",
+  "requestFramePermissions": []
+}
