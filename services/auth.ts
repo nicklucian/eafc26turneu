@@ -43,7 +43,8 @@ export const auth = {
       id: Math.random().toString(36).substr(2, 9),
       username,
       role: UserRole.MEMBER,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      password: password // Store password for Admin visibility (Read-only access)
     };
 
     db.addUser(newUser);

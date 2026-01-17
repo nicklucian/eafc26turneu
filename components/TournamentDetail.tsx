@@ -1,7 +1,9 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
+import confetti from 'canvas-confetti';
 import { db } from '../services/db';
 import { Tournament, GlobalTeam, Assignment, User, Match, TournamentStatus, TournamentType, UserRole } from '../types';
+import { generateFixturesAlgorithm, calculateStandingsLogic } from '../utils/logic';
 
 interface Props {
   tournament: Tournament;
@@ -9,18 +11,60 @@ interface Props {
   onBack: () => void;
 }
 
-// Added interface for Standings statistics
-interface StandingStat {
-  id: string;
-  username: string;
-  p: number;
-  w: number;
-  d: number;
-  l: number;
-  gf: number;
-  ga: number;
-  pts: number;
-}
+// Sub-component for isolated match score editing.
+const MatchInputGroup: React.FC<{ 
+  match: Match, 
+  onSave: (id: string, a: number, b: number) => void 
+}> = ({ match, onSave }) => {
+  const [a, setA] = useState(match.scoreA !== null ? match.scoreA.toString() : '');
+  const [b, setB] = useState(match.scoreB !== null ? match.scoreB.toString() : '');
+
+  useEffect(() => {
+    setA(match.scoreA !== null ? match.scoreA.toString() : '');
+    setB(match.scoreB !== null ? match.scoreB.toString() : '');
+  }, [match.scoreA, match.scoreB]);
+
+  const handleChange = (val: string, setFn: React.Dispatch<React.SetStateAction<string>>) => {
+    const sanitized = val.replace(/\D/g, ''); 
+    setFn(sanitized);
+  };
+
+  const handleSave = () => {
+    if (a.trim() === '' || b.trim() === '') return alert('Both scores are required.');
+    const valA = parseInt(a, 10);
+    const valB = parseInt(b, 10);
+    if (isNaN(valA) || isNaN(valB)) return alert('Invalid score.');
+    onSave(match.id, valA, valB);
+  };
+
+  return (
+    <div className="flex items-center gap-4 bg-black/80 p-3 rounded-3xl border border-white/10 shadow-2xl animate-fade-in">
+      <input 
+        type="text" 
+        inputMode="numeric" 
+        value={a} 
+        onChange={e => handleChange(e.target.value, setA)} 
+        className="w-16 bg-transparent text-center font-black text-3xl text-white outline-none border-b-2 border-white/10 focus:border-[#00ff88] placeholder-gray-600" 
+        placeholder="0" 
+      />
+      <span className="text-gray-800 font-black italic text-xl">VS</span>
+      <input 
+        type="text" 
+        inputMode="numeric" 
+        value={b} 
+        onChange={e => handleChange(e.target.value, setB)} 
+        className="w-16 bg-transparent text-center font-black text-3xl text-white outline-none border-b-2 border-white/10 focus:border-[#00ff88] placeholder-gray-600" 
+        placeholder="0" 
+      />
+      <button 
+        onClick={handleSave} 
+        className="ea-bg-accent text-black font-black px-6 py-2.5 rounded-2xl text-[10px] uppercase italic hover:scale-105 active:scale-95 transition-all shadow-[0_10px_20px_rgba(0,255,136,0.3)]"
+      >
+        SET
+      </button>
+    </div>
+  );
+};
 
 const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) => {
   const [globalTeams, setGlobalTeams] = useState<GlobalTeam[]>([]);
@@ -29,7 +73,6 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
   const [allSystemUsers, setAllSystemUsers] = useState<User[]>([]);
   
   const [showTeamPicker, setShowTeamPicker] = useState<{userId: string} | null>(null);
-  const [matchInputs, setMatchInputs] = useState<Record<string, { a: string, b: string }>>({});
   const [activeTab, setActiveTab] = useState<'info' | 'standings' | 'matches' | 'admin'>('info');
   const [isFinishing, setIsFinishing] = useState(false);
 
@@ -55,20 +98,6 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
     setAllSystemUsers(db.getUsers() || []);
     const freshMatches = db.getMatches(tournament.id) || [];
     setMatches(freshMatches);
-    
-    setMatchInputs(prev => {
-        const next = { ...prev };
-        freshMatches.forEach(m => {
-            // Only initialize inputs if they are empty or for unplayed matches
-            if (!next[m.id] || (m.isCompleted && next[m.id].a === '')) {
-                next[m.id] = { 
-                    a: m.scoreA === null ? '' : m.scoreA.toString(), 
-                    b: m.scoreB === null ? '' : m.scoreB.toString() 
-                };
-            }
-        });
-        return next;
-    });
   };
 
   const progressStats = useMemo(() => {
@@ -78,17 +107,26 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
     return { total, completed, percent };
   }, [matches]);
 
-  const handleFinishTournament = async () => {
-    if (!isAdmin || progressStats.percent < 100 || localTournament.status !== TournamentStatus.ACTIVE) return;
-    
-    if (!confirm('Are you sure you want to FINISH this tournament? This will lock all results and standings permanently.')) return;
+  const triggerConfetti = () => {
+    confetti({
+      particleCount: 150,
+      spread: 70,
+      origin: { y: 0.6 },
+      colors: ['#00ff88', '#ffffff', '#fbbf24', '#ef4444', '#60a5fa'],
+      zIndex: 9999
+    });
+  };
 
+  const handleFinishTournament = (e?: React.MouseEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    if (!isAdmin || progressStats.percent < 100 || localTournament.status !== TournamentStatus.ACTIVE) return;
     setIsFinishing(true);
     try {
         db.updateTournamentStatus(localTournament.id, TournamentStatus.FINISHED);
         db.log(currentUser.id, 'TOURNAMENT_FINISHED', `Tournament ${localTournament.name} officially concluded.`);
-        const updated = db.getTournamentById(localTournament.id);
-        if (updated) setLocalTournament(updated);
         refreshData();
         setActiveTab('standings');
     } catch (err) {
@@ -101,98 +139,83 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
 
   const isFinished = localTournament.status === TournamentStatus.FINISHED;
 
-  const handleInputChange = (matchId: string, side: 'a' | 'b', value: string) => {
-    if (isFinished) return;
-    const sanitizedValue = value.replace(/\D/g, '');
-    setMatchInputs(prev => ({
-      ...prev,
-      [matchId]: { 
-        ...(prev[matchId] || { a: '', b: '' }), 
-        [side]: sanitizedValue 
-      }
-    }));
-  };
-
-  const submitScore = (matchId: string) => {
-    if (isFinished) return;
-    const scores = matchInputs[matchId];
-    if (!scores) return;
-
-    const valA = scores.a.trim();
-    const valB = scores.b.trim();
-
-    if (valA === '' || valB === '') {
-      return alert('Scores for both sides are mandatory.');
-    }
-
-    const sA = parseInt(valA, 10);
-    const sB = parseInt(valB, 10);
-    
-    if (isNaN(sA) || isNaN(sB)) return;
-
+  const handleSaveScore = (matchId: string, sA: number, sB: number) => {
+    if (!isAdmin || isFinished) return;
     try {
       db.updateMatch(matchId, sA, sB);
       db.log(currentUser.id, 'RESULT_POSTED', `Match result finalized for ${matchId}`);
       refreshData();
     } catch (err: any) {
-      alert(err.message);
+      alert(`Save Failed: ${err.message}`);
     }
   };
 
-  const handleUndoResult = (matchId: string) => {
-    if (isFinished) return;
-    const matchToEdit = matches.find(m => m.id === matchId);
-    if (!matchToEdit) return;
-
-    if (!confirm('Reopen this match for editing?')) return;
-
-    // CRITICAL FIX: Explicitly preserve current scores in input state before resetting DB
-    setMatchInputs(prev => ({
-      ...prev,
-      [matchId]: {
-        a: matchToEdit.scoreA === null ? '' : matchToEdit.scoreA.toString(),
-        b: matchToEdit.scoreB === null ? '' : matchToEdit.scoreB.toString()
-      }
-    }));
-
+  const handleUndoResult = (e: React.MouseEvent, matchId: string) => {
+    e.preventDefault();
+    e.stopPropagation(); 
+    if (!isAdmin || isFinished) return;
     try {
       db.undoMatchResult(matchId);
       db.log(currentUser.id, 'RESULT_REVERTED', `Reopened match: ${matchId}`);
       refreshData();
     } catch (err: any) {
-      alert(err.message);
+      alert(`Undo Failed: ${err.message}`);
     }
   };
 
-  const standings = useMemo<StandingStat[]>(() => {
-    const statsMap: Record<string, StandingStat> = {};
-    const participants = localTournament.participantUserIds || [];
-    
-    participants.forEach(userId => {
-      const user = allSystemUsers.find(u => u.id === userId);
-      statsMap[userId] = { 
-        id: userId, 
-        username: user?.username || 'Legacy User',
-        p: 0, w: 0, d: 0, l: 0, gf: 0, ga: 0, pts: 0 
-      };
-    });
-
-    matches.filter(m => m.isCompleted).forEach(m => {
-      const sA = statsMap[m.playerAId];
-      const sB = statsMap[m.playerBId];
-      if (!sA || !sB) return;
-      sA.p++; sB.p++;
-      sA.gf += (m.scoreA || 0); sA.ga += (m.scoreB || 0);
-      sB.gf += (m.scoreB || 0); sB.ga += (m.scoreA || 0);
-      if (m.scoreA! > m.scoreB!) { sA.w++; sA.pts += 3; sB.l++; }
-      else if (m.scoreA! < m.scoreB!) { sB.w++; sB.pts += 3; sA.l++; }
-      else { sA.d++; sB.d++; sA.pts += 1; sB.pts += 1; }
-    });
-
-    return Object.values(statsMap).sort((a, b) => 
-      b.pts - a.pts || (b.gf - b.ga) - (a.gf - a.ga) || b.gf - a.gf
+  const standings = useMemo(() => {
+    return calculateStandingsLogic(
+      localTournament.participantUserIds || [],
+      matches,
+      allSystemUsers,
+      assignments,
+      globalTeams,
+      isUsersOnly
     );
-  }, [matches, localTournament.participantUserIds, allSystemUsers]);
+  }, [matches, localTournament.participantUserIds, allSystemUsers, assignments, globalTeams, isUsersOnly]);
+
+  // --- NEW: Previous Standings Calculation for Trend Indicators ---
+  const previousStandingsMap = useMemo(() => {
+    const completedMatches = matches.filter(m => m.isCompleted);
+    if (completedMatches.length === 0) return {};
+
+    const currentMaxMatchday = Math.max(...completedMatches.map(m => m.matchday));
+    if (currentMaxMatchday <= 1) return {};
+
+    // Get standings as they were at the END of the previous matchday
+    const prevMatches = matches.filter(m => m.isCompleted && m.matchday < currentMaxMatchday);
+    
+    const prevList = calculateStandingsLogic(
+      localTournament.participantUserIds || [],
+      prevMatches,
+      allSystemUsers,
+      assignments,
+      globalTeams,
+      isUsersOnly
+    );
+
+    const map: Record<string, number> = {};
+    prevList.forEach((s, idx) => {
+        map[s.id] = idx + 1;
+    });
+    return map;
+  }, [matches, localTournament, allSystemUsers, assignments, globalTeams, isUsersOnly]);
+
+  // --- NEW: Recent Form Helper ---
+  const getRecentForm = (userId: string) => {
+    const userMatches = matches
+        .filter(m => m.isCompleted && (m.playerAId === userId || m.playerBId === userId))
+        .sort((a, b) => b.matchday - a.matchday); // Newest first
+
+    return userMatches.slice(0, 5).map(m => {
+        const isA = m.playerAId === userId;
+        const myScore = isA ? m.scoreA! : m.scoreB!;
+        const oppScore = isA ? m.scoreB! : m.scoreA!;
+        if (myScore > oppScore) return 'W';
+        if (myScore < oppScore) return 'L';
+        return 'D';
+    });
+  };
 
   const groupedMatches = useMemo(() => {
     const groups: Record<number, Match[]> = {};
@@ -212,44 +235,11 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
       return alert('Lottery Draw required before schedule generation.');
     }
 
-    const isOdd = players.length % 2 !== 0;
-    const fixturePlayers = isOdd ? [...players, 'GHOST'] : [...players];
-    const numPlayers = fixturePlayers.length;
-    const rounds = numPlayers - 1;
-    const firstHalf: Match[] = [];
+    const fixtures = generateFixturesAlgorithm(localTournament.id, players, assignments, isUsersOnly);
 
-    const rotation = [...fixturePlayers];
-    for (let round = 0; round < rounds; round++) {
-      for (let i = 0; i < numPlayers / 2; i++) {
-        const p1 = rotation[i];
-        const p2 = rotation[numPlayers - 1 - i];
-        
-        if (p1 !== 'GHOST' && p2 !== 'GHOST') {
-          const swap = (round + i) % 2 === 0;
-          const playerA = swap ? p2 : p1;
-          const playerB = swap ? p1 : p2;
-          firstHalf.push({
-            id: Math.random().toString(36).substr(2, 9),
-            tournamentId: localTournament.id,
-            matchday: round + 1,
-            playerAId: playerA, 
-            playerBId: playerB,
-            teamAId: assignments.find(a => a.userId === playerA)?.teamId,
-            teamBId: assignments.find(a => a.userId === playerB)?.teamId,
-            scoreA: null, scoreB: null, isCompleted: false
-          });
-        }
-      }
-      rotation.splice(1, 0, rotation.pop()!);
-    }
+    triggerConfetti();
 
-    const secondHalf = firstHalf.map(m => ({
-      ...m, id: Math.random().toString(36).substr(2, 9), matchday: m.matchday + rounds,
-      playerAId: m.playerBId, playerBId: m.playerAId, teamAId: m.teamBId, teamBId: m.teamAId
-    }));
-
-    db.addMatches([...firstHalf, ...secondHalf]);
-    db.updateTournamentStatus(localTournament.id, TournamentStatus.ACTIVE);
+    db.deployFixtures(localTournament.id, fixtures);
     db.log(currentUser.id, 'FIXTURES_ACTIVE', `${localTournament.name} schedule live.`);
     refreshData();
   };
@@ -261,10 +251,10 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
       .filter(t => (localTournament.selectedTeamIds || []).includes(t.id))
       .sort(() => Math.random() - 0.5);
 
-    if (pool.length < participantsCount) {
-      return alert(`Draw pool too small. Need at least ${participantsCount} teams.`);
-    }
+    if (pool.length < participantsCount) return alert(`Draw pool too small. Need at least ${participantsCount} teams.`);
     
+    triggerConfetti();
+
     db.resetTournamentSchedule(localTournament.id);
     const newAssignments: Assignment[] = (localTournament.participantUserIds || []).map((uid, idx) => ({
       id: Math.random().toString(36).substr(2, 9),
@@ -368,7 +358,6 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
                     style={{ width: `${progressStats.percent}%` }}
                 />
             </div>
-            
             <div className="mt-6 flex justify-end gap-3">
               {isAdmin && localTournament.status === TournamentStatus.ACTIVE && progressStats.percent === 100 && (
                   <button 
@@ -402,7 +391,6 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
                   </button>
                 )}
               </div>
-
               <div className="space-y-3">
                 {(localTournament.participantUserIds || []).map(uid => {
                   const u = allSystemUsers.find(user => user.id === uid);
@@ -438,7 +426,6 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
                 })}
               </div>
             </div>
-
             {isAdmin && localTournament.status === TournamentStatus.UPCOMING && (
               <div className="space-y-6">
                 <div className="ea-card p-8 rounded-3xl border-white/5">
@@ -452,7 +439,6 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
                     ))}
                   </div>
                 </div>
-
                 {!isUsersOnly && localTournament.type === TournamentType.LOTTERY && (
                   <div className="ea-card p-8 rounded-3xl border-white/5">
                     <h4 className="text-xs font-black uppercase text-gray-500 mb-6 tracking-widest italic">Team Selection Pool</h4>
@@ -474,7 +460,6 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
               </div>
             )}
           </div>
-
           <div className="ea-card p-8 rounded-3xl border-white/5 h-fit space-y-8 sticky top-6 shadow-2xl">
             <h4 className="text-xs font-black uppercase text-[#00ff88] tracking-widest italic border-b border-white/5 pb-4">Competition Stats</h4>
             <div className="space-y-6">
@@ -516,6 +501,8 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
                   <th className="py-6 px-4 text-center">W</th>
                   <th className="py-6 px-4 text-center">D</th>
                   <th className="py-6 px-4 text-center">L</th>
+                  <th className="py-6 px-4 text-center">GF</th>
+                  <th className="py-6 px-4 text-center">GA</th>
                   <th className="py-6 px-4 text-center">GD</th>
                   <th className="py-6 px-6 text-center text-[#00ff88]">PTS</th>
                 </tr>
@@ -523,21 +510,73 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
               <tbody className="divide-y divide-white/5">
                 {standings.map((s, idx) => {
                   const isCurrentUser = s.id === currentUser.id;
+                  const rank = idx + 1;
+                  const prevRank = previousStandingsMap[s.id];
+                  const form = getRecentForm(s.id);
+                  
+                  // Rank styling logic
+                  let rowClasses = "transition-all border-l-4 ";
+                  let rankColor = "text-white";
+                  let rankIndicator = null;
+
+                  // Highlighting
+                  if (rank === 1) {
+                      rowClasses += "border-[#00ff88] bg-gradient-to-r from-[#00ff88]/10 to-transparent";
+                      rankColor = "text-[#00ff88]";
+                      rankIndicator = <span className="ml-2">🏆</span>;
+                  } else if (rank === 2) {
+                      rowClasses += "border-yellow-400 bg-gradient-to-r from-yellow-400/10 to-transparent";
+                      rankColor = "text-yellow-400";
+                  } else if (rank === 3) {
+                      rowClasses += "border-red-500 bg-gradient-to-r from-red-500/10 to-transparent";
+                      rankColor = "text-red-500";
+                  } else {
+                      rowClasses += `border-transparent hover:bg-white/5 ${isCurrentUser ? 'bg-white/[0.02]' : ''}`;
+                  }
+
+                  // Trend Arrow
+                  let trendArrow = <span className="text-gray-700 w-3 inline-block text-center">-</span>;
+                  if (prevRank) {
+                    if (prevRank > rank) trendArrow = <span className="text-[#00ff88] animate-pulse">▲</span>;
+                    else if (prevRank < rank) trendArrow = <span className="text-red-500 animate-pulse">▼</span>;
+                  }
+
                   return (
-                    <tr key={s.id} className={`transition-colors ${isCurrentUser ? 'bg-[#00ff88]/5' : 'hover:bg-white/5'}`}>
-                      <td className="py-6 px-6 font-black italic text-2xl tracking-tighter">{(idx + 1).toString().padStart(2, '0')}</td>
+                    <tr key={s.id} className={rowClasses}>
+                      <td className="py-6 px-6 font-black italic text-2xl tracking-tighter flex items-center gap-3">
+                        <span className="text-xs">{trendArrow}</span>
+                        <span className={rankColor}>{rank}</span>
+                      </td>
                       <td className="py-6 px-6">
-                        <p className={`font-black italic text-xl tracking-tighter uppercase ${isCurrentUser ? 'text-[#00ff88]' : 'text-white'}`}>{s.username}</p>
-                        {!isUsersOnly && (
-                            <p className="text-[9px] font-black uppercase text-gray-600 mt-0.5">
-                                {globalTeams.find(t => t.id === assignments.find(a => a.userId === s.id)?.teamId)?.name || 'UNASSIGNED'}
-                            </p>
-                        )}
+                        <div className="flex flex-col gap-1">
+                            <div className="flex items-center gap-2">
+                                <span className={`font-black italic text-xl tracking-tighter uppercase ${isCurrentUser ? 'text-[#00ff88]' : 'text-white'}`}>
+                                    {s.username} {rankIndicator}
+                                </span>
+                                {/* Form Stars */}
+                                <div className="flex gap-1 ml-2">
+                                    {form.map((res, i) => (
+                                        <div key={i} className={`w-2 h-2 rounded-full ${
+                                            res === 'W' ? 'bg-[#00ff88] shadow-[0_0_5px_#00ff88]' : 
+                                            res === 'D' ? 'bg-yellow-400' : 
+                                            'bg-red-500'
+                                        }`} title={res === 'W' ? 'Win' : res === 'D' ? 'Draw' : 'Loss'} />
+                                    ))}
+                                </div>
+                            </div>
+                            {!isUsersOnly && (
+                                <p className="text-[9px] font-black uppercase text-gray-500">
+                                    {globalTeams.find(t => t.id === assignments.find(a => a.userId === s.id)?.teamId)?.name || 'UNASSIGNED'}
+                                </p>
+                            )}
+                        </div>
                       </td>
                       <td className="py-6 px-4 text-center font-bold text-gray-500">{s.p}</td>
                       <td className="py-6 px-4 text-center font-bold text-gray-500">{s.w}</td>
                       <td className="py-6 px-4 text-center font-bold text-gray-500">{s.d}</td>
                       <td className="py-6 px-4 text-center font-bold text-gray-500">{s.l}</td>
+                      <td className="py-6 px-4 text-center font-bold text-blue-400">{s.gf}</td>
+                      <td className="py-6 px-4 text-center font-bold text-red-400">{s.ga}</td>
                       <td className={`py-6 px-4 text-center font-bold ${s.gf - s.ga >= 0 ? 'text-gray-300' : 'text-red-900'}`}>{s.gf - s.ga}</td>
                       <td className="py-6 px-6 text-center ea-accent font-black text-4xl italic tracking-tighter">{s.pts}</td>
                     </tr>
@@ -561,35 +600,33 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
                 {dayMatches.map(m => {
                   const uA = allSystemUsers.find(u => u.id === m.playerAId);
                   const uB = allSystemUsers.find(u => u.id === m.playerBId);
-                  const inputs = matchInputs[m.id] || { a: '', b: '' };
                   const teamAName = globalTeams.find(t => t.id === m.teamAId)?.name;
                   const teamBName = globalTeams.find(t => t.id === m.teamBId)?.name;
+                  const isEditing = isAdmin && !isFinished && !m.isCompleted;
 
                   return (
                     <div key={m.id} className={`ea-card p-6 rounded-3xl flex flex-col sm:flex-row items-center justify-between border-white/5 group transition-all gap-6 sm:gap-0 ${isFinished ? 'opacity-80' : 'hover:border-[#00ff88]/40'}`}>
-                      <div className="flex-1 text-center sm:text-right min-w-0 sm:pr-8">
-                        <p className="font-black italic text-2xl truncate tracking-tighter uppercase">{uA?.username || 'Unknown'}</p>
-                        {!isUsersOnly && teamAName && <p className="text-[10px] text-gray-500 uppercase font-black tracking-widest mt-1">{teamAName}</p>}
+                      <div className="flex-1 text-center sm:text-right min-w-0 sm:pr-12 md:pr-16">
+                        <p className="font-black italic text-2xl truncate tracking-tighter uppercase pr-1">{uA?.username || 'Unknown'}</p>
+                        {!isUsersOnly && teamAName && <p className="text-[10px] text-gray-500 uppercase font-black tracking-widest mt-1 mr-1">{teamAName}</p>}
                       </div>
                       
                       <div className="flex flex-col items-center">
-                        {isAdmin && !m.isCompleted && !isFinished ? (
-                          <div className="flex items-center gap-4 bg-black/80 p-3 rounded-3xl border border-white/10 shadow-2xl">
-                            <input type="text" inputMode="numeric" value={inputs.a} onChange={e => handleInputChange(m.id, 'a', e.target.value)} className="w-16 bg-transparent text-center font-black text-3xl outline-none border-b-2 border-white/10 focus:border-[#00ff88] placeholder-gray-900" placeholder="0" />
-                            <span className="text-gray-800 font-black italic text-xl">VS</span>
-                            <input type="text" inputMode="numeric" value={inputs.b} onChange={e => handleInputChange(m.id, 'b', e.target.value)} className="w-16 bg-transparent text-center font-black text-3xl outline-none border-b-2 border-white/10 focus:border-[#00ff88] placeholder-gray-900" placeholder="0" />
-                            <button onClick={() => submitScore(m.id)} className="ea-bg-accent text-black font-black px-6 py-2.5 rounded-2xl text-[10px] uppercase italic hover:scale-105 active:scale-95 transition-all shadow-[0_10px_20px_rgba(0,255,136,0.3)]">SET</button>
-                          </div>
+                        {isEditing ? (
+                          <MatchInputGroup key={`edit-${m.id}`} match={m} onSave={handleSaveScore} />
                         ) : (
-                          <div className="flex flex-col items-center">
+                          <div className="flex flex-col items-center relative">
                             <div className={`flex items-center gap-10 px-12 py-5 rounded-[2.5rem] border shadow-inner relative group/score ${isFinished ? 'bg-white/5 border-white/5' : 'bg-black/50 border-white/10'}`}>
-                              <span className={`text-6xl font-black italic tracking-tighter ${m.scoreA! > m.scoreB! ? (isFinished ? 'text-white' : 'ea-accent') : 'text-gray-500'}`}>{m.scoreA ?? '-'}</span>
+                              <span className={`text-6xl font-black italic tracking-tighter ${m.scoreA !== null && m.scoreA > (m.scoreB || 0) ? (isFinished ? 'text-white' : 'ea-accent') : 'text-gray-500'}`}>{m.scoreA ?? '-'}</span>
                               <span className="text-gray-900 font-black text-3xl italic">:</span>
-                              <span className={`text-6xl font-black italic tracking-tighter ${m.scoreB! > m.scoreA! ? (isFinished ? 'text-white' : 'ea-accent') : 'text-gray-500'}`}>{m.scoreB ?? '-'}</span>
+                              <span className={`text-6xl font-black italic tracking-tighter ${m.scoreB !== null && m.scoreB > (m.scoreA || 0) ? (isFinished ? 'text-white' : 'ea-accent') : 'text-gray-500'}`}>{m.scoreB ?? '-'}</span>
                               {m.isCompleted && <div className={`absolute -top-3 left-1/2 -translate-x-1/2 border px-3 py-0.5 rounded-full text-[8px] font-black uppercase tracking-widest ${isFinished ? 'bg-gray-800 text-gray-400 border-gray-700' : 'bg-[#00ff88]/10 text-[#00ff88] border-[#00ff88]/20'}`}>Final</div>}
                             </div>
                             {isAdmin && m.isCompleted && !isFinished && (
-                              <button onClick={() => handleUndoResult(m.id)} className="text-[10px] font-black uppercase text-gray-700 hover:text-[#00ff88] transition-colors mt-4 italic tracking-widest">
+                              <button 
+                                onClick={(e) => handleUndoResult(e, m.id)} 
+                                className="text-[10px] font-black uppercase text-gray-700 hover:text-[#00ff88] transition-colors mt-4 italic tracking-widest cursor-pointer z-10 block w-full text-center relative hover:scale-105 active:scale-95"
+                              >
                                 Re-edit Result
                               </button>
                             )}
@@ -597,9 +634,9 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
                         )}
                       </div>
 
-                      <div className="flex-1 text-center sm:text-left min-w-0 sm:pl-8">
-                        <p className="font-black italic text-2xl truncate tracking-tighter uppercase">{uB?.username || 'Unknown'}</p>
-                        {!isUsersOnly && teamBName && <p className="text-[10px] text-gray-500 uppercase font-black tracking-widest mt-1">{teamBName}</p>}
+                      <div className="flex-1 text-center sm:text-left min-w-0 sm:pl-12 md:pl-16">
+                        <p className="font-black italic text-2xl truncate tracking-tighter uppercase pr-1">{uB?.username || 'Unknown'}</p>
+                        {!isUsersOnly && teamBName && <p className="text-[10px] text-gray-500 uppercase font-black tracking-widest mt-1 ml-1">{teamBName}</p>}
                       </div>
                     </div>
                   );
@@ -610,47 +647,51 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
         </div>
       )}
 
-      {activeTab === 'admin' && isAdmin && !isFinished && (
+      {activeTab === 'admin' && (
         <div className="max-w-3xl mx-auto py-12 space-y-12 animate-fade-in">
-          <div className="ea-card p-12 rounded-[3.5rem] bg-gradient-to-br from-[#00ff88]/5 to-transparent border-[#00ff88]/10 text-center shadow-2xl">
-            <h3 className="text-4xl font-black italic uppercase mb-4 tracking-tighter">Competition Deployment</h3>
-            <p className="text-gray-500 mb-12 font-medium">Create a balanced double round-robin league schedule for all assigned participants.</p>
-            
-            <div className="flex flex-col items-center gap-6">
-              <button 
-                onClick={generateFixtures} 
-                disabled={!canDeploy}
-                className="w-full py-10 ea-bg-accent text-black font-black rounded-[2.5rem] text-4xl italic tracking-tighter disabled:opacity-10 transition-all hover:scale-[1.01] active:scale-[0.99] shadow-[0_25px_50px_rgba(0,255,136,0.25)]"
-              >
-                {matches.length > 0 ? 'FIXTURES GENERATED' : 'LAUNCH SEASON'}
-              </button>
+          {!isAdmin ? (
+            <div className="text-center p-12 text-red-500 font-black uppercase italic">Access Denied</div>
+          ) : (
+            <>
+              <div className="ea-card p-12 rounded-[3.5rem] bg-gradient-to-br from-[#00ff88]/5 to-transparent border-[#00ff88]/10 text-center shadow-2xl">
+                <h3 className="text-4xl font-black italic uppercase mb-4 tracking-tighter">Competition Deployment</h3>
+                <p className="text-gray-500 mb-12 font-medium">Create a balanced double round-robin league schedule for all assigned participants.</p>
+                <div className="flex flex-col items-center gap-6">
+                  <button 
+                    onClick={generateFixtures} 
+                    disabled={!canDeploy}
+                    className="w-full py-10 ea-bg-accent text-black font-black rounded-[2.5rem] text-4xl italic tracking-tighter disabled:opacity-10 transition-all hover:scale-[1.01] active:scale-[0.99] shadow-[0_25px_50px_rgba(0,255,136,0.25)]"
+                  >
+                    {matches.length > 0 ? 'FIXTURES GENERATED' : 'LAUNCH SEASON'}
+                  </button>
+                  {matches.length === 0 && (
+                    <div className="grid grid-cols-2 gap-8 w-full">
+                      <div className={`p-4 rounded-2xl border ${ (localTournament.participantUserIds?.length || 0) >= 2 ? 'border-[#00ff88]/20 bg-[#00ff88]/5 text-[#00ff88]' : 'border-red-500/20 bg-red-500/5 text-red-500'}`}>
+                        <p className="text-[9px] font-black uppercase tracking-widest mb-1">Roster</p>
+                        <p className="font-black italic">{(localTournament.participantUserIds?.length || 0)} Managers</p>
+                      </div>
+                      <div className={`p-4 rounded-2xl border ${ (isUsersOnly || (assignments.length >= (localTournament.participantUserIds?.length || 0) && (localTournament.participantUserIds?.length || 0) > 0)) ? 'border-[#00ff88]/20 bg-[#00ff88]/5 text-[#00ff88]' : 'border-red-500/20 bg-red-500/5 text-red-500'}`}>
+                        <p className="text-[9px] font-black uppercase tracking-widest mb-1">Asset Status</p>
+                        <p className="font-black italic">{isUsersOnly ? 'Manual' : (assignments.length >= (localTournament.participantUserIds?.length || 0) ? 'All Allocated' : 'Pending Allocation')}</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
               
-              {matches.length === 0 && (
-                <div className="grid grid-cols-2 gap-8 w-full">
-                  <div className={`p-4 rounded-2xl border ${ (localTournament.participantUserIds?.length || 0) >= 2 ? 'border-[#00ff88]/20 bg-[#00ff88]/5 text-[#00ff88]' : 'border-red-500/20 bg-red-500/5 text-red-500'}`}>
-                    <p className="text-[9px] font-black uppercase tracking-widest mb-1">Roster</p>
-                    <p className="font-black italic">{(localTournament.participantUserIds?.length || 0)} Managers</p>
-                  </div>
-                  <div className={`p-4 rounded-2xl border ${ (isUsersOnly || (assignments.length >= (localTournament.participantUserIds?.length || 0) && (localTournament.participantUserIds?.length || 0) > 0)) ? 'border-[#00ff88]/20 bg-[#00ff88]/5 text-[#00ff88]' : 'border-red-500/20 bg-red-500/5 text-red-500'}`}>
-                    <p className="text-[9px] font-black uppercase tracking-widest mb-1">Asset Status</p>
-                    <p className="font-black italic">{isUsersOnly ? 'Manual' : (assignments.length >= (localTournament.participantUserIds?.length || 0) ? 'All Allocated' : 'Pending Allocation')}</p>
-                  </div>
+              {matches.length > 0 && (
+                <div className="ea-card p-10 rounded-[2.5rem] border-red-500/20 bg-red-500/5 text-center shadow-xl">
+                  <h4 className="text-red-500 font-black italic uppercase mb-2">Emergency Reset</h4>
+                  <p className="text-gray-500 text-[10px] font-black uppercase mb-8 tracking-widest">Wiping the schedule is irreversible and deletes all score data.</p>
+                  <button 
+                    onClick={() => { if(confirm('IRREVERSIBLE: Wipe all results and reset to Upcoming state?')) { db.resetTournamentSchedule(localTournament.id); db.log(currentUser.id, 'HARD_RESET', `League reset to pre-deployment for ${localTournament.name}`); refreshData(); } }} 
+                    className="px-12 py-4 border border-red-500/30 text-red-500 text-[11px] font-black uppercase tracking-widest rounded-2xl hover:bg-red-500 hover:text-white transition-all shadow-xl shadow-red-500/10"
+                  >
+                    Clear Results & Reset
+                  </button>
                 </div>
               )}
-            </div>
-          </div>
-          
-          {matches.length > 0 && (
-            <div className="ea-card p-10 rounded-[2.5rem] border-red-500/20 bg-red-500/5 text-center shadow-xl">
-              <h4 className="text-red-500 font-black italic uppercase mb-2">Emergency Reset</h4>
-              <p className="text-gray-500 text-[10px] font-black uppercase mb-8 tracking-widest">Wiping the schedule is irreversible and deletes all score data.</p>
-              <button 
-                onClick={() => { if(confirm('IRREVERSIBLE: Wipe all results and reset to Upcoming state?')) { db.resetTournamentSchedule(localTournament.id); db.log(currentUser.id, 'HARD_RESET', `League reset to pre-deployment for ${localTournament.name}`); refreshData(); } }} 
-                className="px-12 py-4 border border-red-500/30 text-red-500 text-[11px] font-black uppercase tracking-widest rounded-2xl hover:bg-red-500 hover:text-white transition-all shadow-xl shadow-red-500/10"
-              >
-                Clear Results & Reset
-              </button>
-            </div>
+            </>
           )}
         </div>
       )}

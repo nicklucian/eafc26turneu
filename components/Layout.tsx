@@ -22,9 +22,41 @@ const Layout: React.FC<LayoutProps> = ({ user, onLogout, children, setCurrentPag
   ];
 
   return (
-    <div className="min-h-screen flex flex-col md:flex-row">
+    <div className="min-h-screen flex flex-col md:flex-row relative overflow-hidden">
+      
+      {/* --- GLOBAL FOOTBALL THEMED BACKGROUND --- */}
+      <div className="fixed inset-0 z-0 pointer-events-none select-none">
+        {/* 1. Base Gradient - Lighter start for visibility */}
+        <div className="absolute inset-0 bg-gradient-to-br from-[#15151a] via-[#0a0a0c] to-[#050506]" />
+        
+        {/* 2. Tactical Dot Grid Pattern (Visible Manager's Board) */}
+        <div className="absolute inset-0 opacity-20" 
+             style={{ 
+               backgroundImage: 'radial-gradient(rgba(255, 255, 255, 0.15) 1px, transparent 1px)', 
+               backgroundSize: '32px 32px' 
+             }} 
+        />
+        
+        {/* 3. Pitch Markings - Enhanced Opacity */}
+        {/* Center Circle */}
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[80vh] h-[80vh] rounded-full border-2 border-dashed border-white/10 animate-[spin_120s_linear_infinite]" />
+        
+        {/* Inner Circle */}
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[50vh] h-[50vh] rounded-full border border-white/10" />
+        
+        {/* Midfield Line */}
+        <div className="absolute top-0 bottom-0 left-1/2 w-px bg-gradient-to-b from-transparent via-white/20 to-transparent" />
+        
+        {/* Corner Arcs */}
+        <div className="absolute top-0 left-0 w-64 h-64 border-r border-b border-white/10 rounded-br-[80px] opacity-20" />
+        <div className="absolute bottom-0 right-0 w-64 h-64 border-l border-t border-white/10 rounded-tl-[80px] opacity-20" />
+        
+        {/* 4. Vignette Overlay */}
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,transparent_0%,rgba(5,5,6,0.5)_100%)]" />
+      </div>
+
       {/* Sidebar */}
-      <aside className="w-full md:w-64 bg-[#111114] border-r border-white/10 flex flex-col sticky top-0 h-auto md:h-screen">
+      <aside className="w-full md:w-64 bg-[#111114]/90 backdrop-blur-md border-r border-white/10 flex flex-col sticky top-0 h-auto md:h-screen z-20 relative shadow-2xl">
         <div className="p-6">
           <h1 className="text-xl font-extrabold tracking-tighter italic">
             FC <span className="ea-accent">26</span> PRO
@@ -67,7 +99,7 @@ const Layout: React.FC<LayoutProps> = ({ user, onLogout, children, setCurrentPag
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 p-6 md:p-10 overflow-y-auto">
+      <main className="flex-1 p-6 md:p-10 overflow-y-auto z-10 relative">
         <div className="max-w-6xl mx-auto animate-fade-in">
           {children}
         </div>

@@ -26,6 +26,7 @@ export interface User {
   role: UserRole;
   avatar?: string;
   createdAt: string;
+  password?: string;
 }
 
 export interface InvitationCode {
@@ -101,4 +102,16 @@ export interface ChatMessage {
   text: string;
   timestamp: string;
   tournamentId?: string;
+}
+
+export interface StandingStat {
+  id: string;
+  username: string;
+  p: number;
+  w: number;
+  d: number;
+  l: number;
+  gf: number;
+  ga: number;
+  pts: number;
 }

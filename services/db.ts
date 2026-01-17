@@ -4,8 +4,8 @@ import {
   InvitationCode, GlobalTeam, TeamType, Assignment, Match, AuditLog, ChatMessage 
 } from '../types';
 
-class DatabaseService {
-  private storageKey = 'fc26_db_v5_final';
+export class DatabaseService {
+  private storageKey: string;
 
   private data: {
     users: User[];
@@ -18,7 +18,8 @@ class DatabaseService {
     chatMessages: ChatMessage[];
   };
 
-  constructor() {
+  constructor(storageKey: string = 'fc26_db_v5_final') {
+    this.storageKey = storageKey;
     const saved = localStorage.getItem(this.storageKey);
     if (saved) {
       this.data = JSON.parse(saved);
@@ -63,8 +64,11 @@ class DatabaseService {
   }
 
   private clone<T>(obj: T): T {
+    if (obj === undefined || obj === null) return obj;
     return JSON.parse(JSON.stringify(obj));
   }
+
+  // --- PUBLIC API ---
 
   getUsers() { return this.clone(this.data.users); }
   getCodes() { return this.clone(this.data.invitationCodes); }
@@ -78,22 +82,32 @@ class DatabaseService {
   getAuditLogs() { return this.clone(this.data.auditLogs); }
 
   updateMatch(id: string, scoreA: number, scoreB: number) {
-    const match = this.data.matches.find(m => m.id === id);
-    if (!match) throw new Error("Match not found.");
+    if (typeof scoreA !== 'number' || typeof scoreB !== 'number') {
+      throw new Error("Scores must be valid numbers.");
+    }
+    if (isNaN(scoreA) || isNaN(scoreB)) {
+      throw new Error("Invalid score value (NaN).");
+    }
+    if (scoreA < 0 || scoreB < 0 || !Number.isInteger(scoreA) || !Number.isInteger(scoreB)) {
+      throw new Error("Scores must be non-negative integers.");
+    }
+
+    const matchIndex = this.data.matches.findIndex(m => m.id === id);
+    if (matchIndex === -1) throw new Error("Match not found.");
     
-    this.data.matches = this.data.matches.map(m => 
-      m.id === id ? { ...m, scoreA, scoreB, isCompleted: true } : m
-    );
+    const updatedMatches = [...this.data.matches];
+    updatedMatches[matchIndex] = { ...updatedMatches[matchIndex], scoreA, scoreB, isCompleted: true };
+    this.data.matches = updatedMatches;
     this.save();
   }
 
   undoMatchResult(id: string) {
-    const match = this.data.matches.find(m => m.id === id);
-    if (!match) throw new Error("Match not found.");
+    const matchIndex = this.data.matches.findIndex(m => m.id === id);
+    if (matchIndex === -1) throw new Error("Match not found.");
     
-    this.data.matches = this.data.matches.map(m => 
-      m.id === id ? { ...m, scoreA: null, scoreB: null, isCompleted: false } : m
-    );
+    const updatedMatches = [...this.data.matches];
+    updatedMatches[matchIndex] = { ...updatedMatches[matchIndex], isCompleted: false };
+    this.data.matches = updatedMatches;
     this.save();
   }
 
@@ -118,16 +132,38 @@ class DatabaseService {
     this.data.tournaments = this.data.tournaments.map(t => t.id === id ? { ...t, status } : t);
     this.save();
   }
+  
   resetTournamentSchedule(id: string) {
     this.data.tournaments = this.data.tournaments.map(t => t.id === id ? { ...t, status: TournamentStatus.UPCOMING } : t);
     this.data.matches = this.data.matches.filter(m => m.tournamentId !== id);
     this.data.assignments = this.data.assignments.filter(a => a.tournamentId !== id);
     this.save();
   }
+
+  deployFixtures(tournamentId: string, matches: Match[]) {
+    this.data.matches.push(...matches);
+    this.data.tournaments = this.data.tournaments.map(t => 
+      t.id === tournamentId ? { ...t, status: TournamentStatus.ACTIVE } : t
+    );
+    this.save();
+  }
+
   addMatches(batch: Match[]) { this.data.matches.push(...batch); this.save(); }
   addAssignments(batch: Assignment[]) { this.data.assignments.push(...batch); this.save(); }
   addUser(user: User) { this.data.users.push(user); this.save(); }
-  deleteUser(id: string) { this.data.users = this.data.users.filter(u => u.id !== id); this.save(); }
+
+  deleteUser(id: string) {
+    this.data.assignments = this.data.assignments.filter(a => a.userId !== id);
+    this.data.matches = this.data.matches.filter(m => m.playerAId !== id && m.playerBId !== id);
+    this.data.chatMessages = this.data.chatMessages.filter(c => c.userId !== id);
+    this.data.tournaments = this.data.tournaments.map(t => ({
+      ...t,
+      participantUserIds: t.participantUserIds.filter(uid => uid !== id)
+    }));
+    this.data.users = this.data.users.filter(u => u.id !== id);
+    this.save(); 
+  }
+
   addCode(code: InvitationCode) { this.data.invitationCodes.push(code); this.save(); }
   toggleCode(id: string) {
     const code = this.data.invitationCodes.find(c => c.id === id);
@@ -135,6 +171,7 @@ class DatabaseService {
     this.save();
   }
   deleteCode(id: string) { this.data.invitationCodes = this.data.invitationCodes.filter(c => c.id !== id); this.save(); }
+  
   addGlobalTeam(team: Omit<GlobalTeam, 'id' | 'createdAt' | 'updatedAt' | 'isActive'>) {
     const newTeam: GlobalTeam = { 
       ...team, id: Math.random().toString(36).substr(2, 9), isActive: true, 
@@ -149,14 +186,56 @@ class DatabaseService {
     this.save();
   }
   deleteGlobalTeam(id: string) { this.data.globalTeams = this.data.globalTeams.filter(t => t.id !== id); this.save(); }
+  
   addChatMessage(msg: ChatMessage) { this.data.chatMessages.push(msg); this.save(); }
+
   log(userId: string, action: string, details: string) {
-    this.data.auditLogs.unshift({ id: Math.random().toString(36).substr(2, 9), userId, action, timestamp: new Date().toISOString(), details });
+    this.data.auditLogs.unshift({ 
+      id: Math.random().toString(36).substr(2, 9), 
+      userId, 
+      action, 
+      timestamp: new Date().toISOString(), 
+      details 
+    });
+    if (this.data.auditLogs.length > 100) {
+      this.data.auditLogs = this.data.auditLogs.slice(0, 100);
+    }
     this.save();
   }
+
+  seedTestUsers() {
+    const testUsers = [
+      { id: 'test-1', username: 'TestPlayer_One', role: UserRole.MEMBER, createdAt: new Date().toISOString() },
+      { id: 'test-2', username: 'TestPlayer_Two', role: UserRole.MEMBER, createdAt: new Date().toISOString() },
+      { id: 'test-3', username: 'TestPlayer_Three', role: UserRole.MEMBER, createdAt: new Date().toISOString() },
+      { id: 'test-4', username: 'TestPlayer_Four', role: UserRole.MEMBER, createdAt: new Date().toISOString() },
+      { id: 'test-5', username: 'TestPlayer_Five', role: UserRole.MEMBER, createdAt: new Date().toISOString() },
+      { id: 'test-6', username: 'TestPlayer_Six', role: UserRole.MEMBER, createdAt: new Date().toISOString() }
+    ];
+
+    let addedCount = 0;
+    testUsers.forEach(u => {
+      if (!this.data.users.some(existing => existing.id === u.id)) {
+        this.data.users.push(u);
+        addedCount++;
+      }
+    });
+
+    if (addedCount > 0) {
+      this.save();
+      this.log('system', 'SEED_USERS', `Injected ${addedCount} test users.`);
+    }
+  }
+
   wipeEverything() {
     localStorage.removeItem(this.storageKey);
     window.location.reload();
+  }
+
+  // Testing utility to wipe without reload
+  wipeForTest() {
+    this.data = this.getInitialState();
+    this.save();
   }
 }
 
