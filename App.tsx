@@ -1,17 +1,33 @@
 
-import React, { useState, useEffect, useMemo } from 'react';
-import { auth } from './services/auth';
-import { db } from './services/db';
-import { User, Tournament, TournamentStatus, TournamentType, UserRole, ChatMessage } from './types';
+import React, { useState, useEffect, useMemo, useRef, Suspense } from 'react';
+import type { User as FirebaseUser } from "firebase/auth";
+import { authService } from './services/auth';
+import { databaseService } from './services/db';
+import { initError } from './services/firebase'; 
+import { User, Tournament, TournamentStatus, TournamentType, UserRole, ChatMessage, Match } from './types';
 import Layout from './components/Layout';
-import AdminPanel from './components/AdminPanel';
-import TournamentDetail from './components/TournamentDetail';
-import PlayerProfile from './components/PlayerProfile';
+import { InvitationGate } from './components/InvitationGate';
+
+// Lazy load heavy components to split chunks and improve performance
+const AdminPanel = React.lazy(() => import('./components/AdminPanel'));
+const TournamentDetail = React.lazy(() => import('./components/TournamentDetail'));
+const PlayerProfile = React.lazy(() => import('./components/PlayerProfile'));
 
 const App: React.FC = () => {
-  const [user, setUser] = useState<User | null>(auth.getCurrentUser());
+  const [user, setUser] = useState<User | null>(null);
+  const [pendingAuthUser, setPendingAuthUser] = useState<FirebaseUser | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [currentPage, setCurrentPage] = useState('dashboard');
+  
+  // Data States
   const [tournaments, setTournaments] = useState<Tournament[]>([]);
+  const [allMatches, setAllMatches] = useState<Match[]>([]);
+  const [allUsers, setAllUsers] = useState<User[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [globalTeamsCount, setGlobalTeamsCount] = useState(0);
+  
+  const [dataLoading, setDataLoading] = useState(false);
+  
   const [selectedTournament, setSelectedTournament] = useState<Tournament | null>(null);
   const [selectedProfileUser, setSelectedProfileUser] = useState<User | null>(null);
   
@@ -36,23 +52,116 @@ const App: React.FC = () => {
 
   // Global Chat State
   const [chatMsg, setChatMsg] = useState('');
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
+  // Derived Auth State
+  const hasAdmin = useMemo(() => allUsers.some(u => u.role === UserRole.ADMIN), [allUsers]);
+
+  // --- INITIALIZATION & AUTH ---
+  useEffect(() => {
+    // If there was an init error (missing config), we don't try to connect auth
+    if (initError) {
+        setAuthLoading(false);
+        return;
+    }
+
+    // 1. Listen for Auth Changes
+    const unsubscribe = authService.onAuthStateChanged((u, fbUser) => {
+      if (u) {
+        // Full profile exists
+        setUser(u);
+        setPendingAuthUser(null);
+      } else if (fbUser) {
+        // Authenticated but no profile -> Ghost State
+        setPendingAuthUser(fbUser);
+        setUser(null);
+      } else {
+        // Logged out
+        setUser(null);
+        setPendingAuthUser(null);
+      }
+      setAuthLoading(false);
+    });
+
+    // 2. Check System Health (User Count) for correct UI State
+    const checkSystemHealth = async () => {
+      try {
+        const users = await databaseService.getUsers();
+        setAllUsers(users);
+      } catch (e) {
+        console.warn("System state check failed:", e);
+      }
+    };
+    checkSystemHealth();
+
+    return () => unsubscribe();
+  }, []);
+
+  // --- DATA FETCHING ---
   useEffect(() => {
     if (user) {
-      setTournaments(db.getTournaments());
-      setMessages(db.getChat());
-    } else {
-      // Load saved credentials on logout/init
-      const saved = localStorage.getItem('fc26_remembered_creds');
-      if (saved) {
-        const { username, password } = JSON.parse(saved);
-        setLoginUser(username);
-        setLoginPass(password);
-        setSavePassword(true);
-      }
+      loadDashboardData();
     }
-  }, [user, currentPage]);
+  }, [user, currentPage]); 
+
+  // --- REAL-TIME CHAT SUBSCRIPTION ---
+  useEffect(() => {
+    if (!user) return;
+    
+    // Subscribe to chat updates
+    const unsubscribeChat = databaseService.subscribeToChat((msgs) => {
+        setMessages(msgs);
+        // Scroll to bottom on new message
+        setTimeout(() => {
+            chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }, 100);
+    });
+
+    return () => {
+        unsubscribeChat();
+    }
+  }, [user]);
+
+  const loadDashboardData = async () => {
+    if (initError) return; // Guard
+    setDataLoading(true);
+    try {
+      const [tList, mList, uList, teamsList] = await Promise.all([
+        databaseService.getTournaments(),
+        databaseService.getAllMatches(),
+        databaseService.getUsers(),
+        databaseService.getGlobalTeams()
+      ]);
+      
+      // --- CRITICAL SAFETY FILTER ---
+      // We create a Set of IDs for tournaments that ACTUALLY exist in the DB.
+      const validTournamentIds = new Set(tList.map(t => t.id));
+      
+      // We filter the raw match list. If a match points to a tournament ID 
+      // that is NOT in our valid list (i.e., it was deleted), we exclude it.
+      const validMatches = mList.filter(m => validTournamentIds.has(m.tournamentId));
+
+      // Debug log to confirm filtering works
+      console.log(`Loaded ${mList.length} total matches. Filtered down to ${validMatches.length} valid matches.`);
+
+      setTournaments(tList);
+      setAllMatches(validMatches); // State now only holds clean data
+      setAllUsers(uList);
+      setGlobalTeamsCount(teamsList.length);
+
+      // Seed if empty (First run)
+      if (teamsList.length === 0) {
+        await databaseService.seedDefaultTeams();
+        const recheck = await databaseService.getGlobalTeams();
+        setGlobalTeamsCount(recheck.length);
+      }
+
+    } catch (err) {
+      console.error("Failed to load dashboard data", err);
+    } finally {
+      setDataLoading(false);
+    }
+  };
 
   const playTypingSound = () => {
     if (!soundEnabled) return;
@@ -68,7 +177,6 @@ const App: React.FC = () => {
       gain.connect(ctx.destination);
       
       osc.type = 'sine';
-      // Randomize pitch slightly for mechanical feel
       osc.frequency.setValueAtTime(600 + Math.random() * 200, ctx.currentTime);
       
       gain.gain.setValueAtTime(0.02, ctx.currentTime);
@@ -77,45 +185,49 @@ const App: React.FC = () => {
       osc.start();
       osc.stop(ctx.currentTime + 0.05);
     } catch (e) {
-      // Silently fail if audio context is blocked or invalid
+      // Silently fail
     }
   };
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    const result = auth.login(loginUser, loginPass);
-    if (result) {
-      setUser(result);
-      setError('');
-      if (savePassword) {
-        localStorage.setItem('fc26_remembered_creds', JSON.stringify({ username: loginUser, password: loginPass }));
-      } else {
-        localStorage.removeItem('fc26_remembered_creds');
-      }
-    } else {
-      setError('Invalid credentials.');
-    }
-  };
-
-  const handleRegister = (e: React.FormEvent) => {
-    e.preventDefault();
+    setError('');
     try {
-      const result = auth.register(regUser, regPass, regInvite);
-      if (result) {
-        setUser(result);
-        if (savePassword) {
-          localStorage.setItem('fc26_remembered_creds', JSON.stringify({ username: regUser, password: regPass }));
-        } else {
-          localStorage.removeItem('fc26_remembered_creds');
+      await authService.login(loginUser, loginPass);
+    } catch (err: any) {
+      setError('Invalid credentials or connection error.');
+      console.error(err);
+    }
+  };
+
+  const handleGoogleLogin = async () => {
+    setError('');
+    try {
+        const { isNew, user } = await authService.signInWithGoogle();
+        // If isNew is true, the AuthListener useEffect will catch the 
+        // updated firebase user without a profile and trigger setPendingAuthUser
+        if (!isNew && user) {
+            setUser(user);
         }
-      }
+    } catch (err: any) {
+        console.error(err);
+        setError('Google Sign-In failed or cancelled.');
+    }
+  };
+
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    try {
+      await authService.register(regUser, regPass, regInvite);
     } catch (err: any) {
       setError(err.message);
     }
   };
 
-  const handleCreateTournament = (e: React.FormEvent) => {
+  const handleCreateTournament = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!user) return;
     const nt: Tournament = {
       id: Math.random().toString(36).substr(2, 9),
       name: newTName,
@@ -126,27 +238,28 @@ const App: React.FC = () => {
       participantUserIds: [],
       selectedTeamIds: []
     };
-    db.addTournament(nt);
-    db.log(user!.id, 'Tournament Create', `Created ${newTName} (${newTType})`);
-    setTournaments(db.getTournaments());
-    setShowTModal(false);
+    await databaseService.addTournament(nt);
+    await databaseService.log(user.id, 'Tournament Create', `Created ${newTName} (${newTType})`);
+    
     setNewTName('');
+    setShowTModal(false);
+    loadDashboardData();
   };
 
-  const sendChatMessage = (e: React.FormEvent) => {
+  const sendChatMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!chatMsg) return;
+    if (!chatMsg || !user) return;
     const msg: ChatMessage = {
       id: Math.random().toString(36).substr(2, 9),
-      userId: user!.id,
-      username: user!.username,
-      role: user!.role,
+      userId: user.id,
+      username: user.username,
+      role: user.role,
       text: chatMsg,
       timestamp: new Date().toISOString()
     };
-    db.addChatMessage(msg);
-    setMessages(db.getChat());
+    await databaseService.addChatMessage(msg);
     setChatMsg('');
+    // No need to reload data, subscription handles it
   };
 
   // Helper for Podiums
@@ -222,6 +335,49 @@ const App: React.FC = () => {
      );
   };
 
+  // --- RENDERING ---
+  
+  if (initError) {
+      return (
+        <div className="min-h-screen flex flex-col items-center justify-center bg-[#0a0a0c] text-white p-8">
+            <div className="ea-card p-10 rounded-3xl border-red-500/30 bg-red-500/5 max-w-2xl text-center shadow-2xl">
+                <div className="w-16 h-16 rounded-full bg-red-500/10 flex items-center justify-center mx-auto mb-6 text-2xl">⚠️</div>
+                <h1 className="text-3xl font-black italic tracking-tighter uppercase mb-4 text-red-500">Setup Required</h1>
+                <p className="text-gray-300 mb-8 font-medium">The application cannot connect to the cloud database because the configuration is missing.</p>
+                <div className="text-[10px] font-bold text-red-400 uppercase tracking-widest border border-red-500/20 py-2 px-4 rounded-lg inline-block">
+                    Error: {initError}
+                </div>
+            </div>
+        </div>
+      );
+  }
+
+  if (authLoading) {
+    return (
+        <div className="min-h-screen flex flex-col items-center justify-center bg-[#0a0a0c] text-white">
+            <div className="loader mb-4"></div>
+            <p className="text-[10px] uppercase font-black tracking-widest text-gray-500">Connecting to FC26 Pro Cloud...</p>
+        </div>
+    );
+  }
+
+  // GHOST USER STATE (Google Auth Success, DB Profile Missing)
+  if (pendingAuthUser && !user) {
+      return (
+        <InvitationGate 
+            firebaseUser={pendingAuthUser} 
+            onSuccess={(newUser) => {
+                setPendingAuthUser(null);
+                setUser(newUser);
+            }}
+            onCancel={() => {
+                authService.logout();
+                setPendingAuthUser(null);
+            }}
+        />
+      );
+  }
+
   if (!user) {
     return (
       <div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden">
@@ -230,10 +386,6 @@ const App: React.FC = () => {
           <div className="absolute inset-0 bg-gradient-to-br from-[#15151a] via-[#0a0a0c] to-[#050506]" />
           <div className="absolute inset-0 opacity-20" style={{ backgroundImage: 'radial-gradient(rgba(255, 255, 255, 0.15) 1px, transparent 1px)', backgroundSize: '32px 32px' }} />
           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[80vh] h-[80vh] rounded-full border-2 border-dashed border-white/10 animate-[spin_120s_linear_infinite]" />
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[50vh] h-[50vh] rounded-full border border-white/10" />
-          <div className="absolute top-0 bottom-0 left-1/2 w-px bg-gradient-to-b from-transparent via-white/20 to-transparent" />
-          <div className="absolute top-0 left-0 w-64 h-64 border-r border-b border-white/10 rounded-br-[80px] opacity-20" />
-          <div className="absolute bottom-0 right-0 w-64 h-64 border-l border-t border-white/10 rounded-tl-[80px] opacity-20" />
           <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,transparent_0%,rgba(5,5,6,0.5)_100%)]" />
         </div>
 
@@ -242,17 +394,7 @@ const App: React.FC = () => {
             <h1 className="text-6xl font-black italic tracking-tighter mb-4">
               FC <span className="ea-accent">26</span> PRO
             </h1>
-            <p className="text-gray-500 text-lg">Manage private tournaments like a champion. Double Round-Robin fixtures, atomic lottery draws, and safe audit logs.</p>
-            <div className="mt-8 flex gap-4">
-              <div className="ea-card p-4 rounded-lg flex-1 text-center">
-                <p className="ea-accent font-bold text-2xl">2X</p>
-                <p className="text-[10px] uppercase text-gray-500">H/A Fixtures</p>
-              </div>
-              <div className="ea-card p-4 rounded-lg flex-1 text-center">
-                <p className="ea-accent font-bold text-2xl">100%</p>
-                <p className="text-[10px] uppercase text-gray-500">Atomic Draws</p>
-              </div>
-            </div>
+            <p className="text-gray-500 text-lg">Manage private tournaments like a champion. Real-time cloud sync, automated fixtures, and secure audit logs.</p>
           </div>
 
           <div className="space-y-6">
@@ -264,10 +406,32 @@ const App: React.FC = () => {
             
             <div className="ea-card p-8 rounded-2xl shadow-2xl border border-white/5">
               <h2 className="text-2xl font-black mb-6">SIGN IN</h2>
+              
+              {/* GOOGLE AUTH BUTTON */}
+              <button 
+                type="button"
+                onClick={handleGoogleLogin}
+                className="w-full bg-white text-black font-black py-4 rounded-lg hover:bg-gray-200 transition-all mb-4 flex items-center justify-center gap-3"
+              >
+                <svg className="w-5 h-5" viewBox="0 0 24 24">
+                   <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+                   <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                   <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+                   <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+                </svg>
+                CONTINUE WITH GOOGLE
+              </button>
+
+              <div className="relative flex py-2 items-center">
+                <div className="flex-grow border-t border-white/10"></div>
+                <span className="flex-shrink-0 mx-4 text-[10px] font-black uppercase text-gray-500 tracking-widest">Or using password</span>
+                <div className="flex-grow border-t border-white/10"></div>
+              </div>
+
               <form onSubmit={handleLogin} className="space-y-4">
                 <div>
-                  <label className="block text-[10px] uppercase font-black text-gray-500 mb-2">Username</label>
-                  <input type="text" value={loginUser} onChange={e => { setLoginUser(e.target.value); playTypingSound(); }} className="w-full bg-black/40 border border-white/10 rounded-lg px-4 py-3 focus:border-[#00ff88] outline-none font-bold" placeholder="admin" />
+                  <label className="block text-[10px] uppercase font-black text-gray-500 mb-2">Email / Username</label>
+                  <input type="text" value={loginUser} onChange={e => { setLoginUser(e.target.value); playTypingSound(); }} className="w-full bg-black/40 border border-white/10 rounded-lg px-4 py-3 focus:border-[#00ff88] outline-none font-bold" placeholder="user@fc26pro.com" />
                 </div>
                 <div>
                   <label className="block text-[10px] uppercase font-black text-gray-500 mb-2">Password</label>
@@ -283,41 +447,12 @@ const App: React.FC = () => {
                       type="button" 
                       onClick={() => setShowLoginPass(!showLoginPass)} 
                       className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white transition-colors"
-                      title={showLoginPass ? 'Hide Password' : 'Show Password'}
                     >
-                      {showLoginPass ? (
-                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"></path></svg>
-                      ) : (
-                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
-                      )}
+                      {showLoginPass ? "HIDE" : "SHOW"}
                     </button>
                   </div>
                 </div>
                 
-                <div className="flex items-center justify-between mt-2 gap-4">
-                  <div className="flex items-center gap-2">
-                    <button 
-                      type="button" 
-                      onClick={() => setSavePassword(!savePassword)} 
-                      className={`w-5 h-5 rounded border flex items-center justify-center transition-all ${savePassword ? 'bg-[#00ff88] border-[#00ff88]' : 'bg-transparent border-gray-600 hover:border-gray-400'}`}
-                    >
-                       {savePassword && <svg className="w-3 h-3 text-black" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="4" d="M5 13l4 4L19 7"></path></svg>}
-                    </button>
-                    <span className="text-[9px] font-black text-gray-500 uppercase tracking-widest cursor-pointer select-none" onClick={() => setSavePassword(!savePassword)}>Save Password</span>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <button 
-                      type="button" 
-                      onClick={() => setSoundEnabled(!soundEnabled)} 
-                      className={`w-5 h-5 rounded border flex items-center justify-center transition-all ${soundEnabled ? 'bg-[#00ff88] border-[#00ff88]' : 'bg-transparent border-gray-600 hover:border-gray-400'}`}
-                    >
-                       {soundEnabled && <svg className="w-3 h-3 text-black" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="4" d="M5 13l4 4L19 7"></path></svg>}
-                    </button>
-                    <span className="text-[9px] font-black text-gray-500 uppercase tracking-widest cursor-pointer select-none" onClick={() => setSoundEnabled(!soundEnabled)}>Typing FX</span>
-                  </div>
-                </div>
-
                 <button type="submit" className="w-full ea-bg-accent text-black font-black py-4 rounded-lg hover:brightness-110 transition-all mt-4 italic">ENTER PITCH</button>
               </form>
             </div>
@@ -339,28 +474,18 @@ const App: React.FC = () => {
                       type="button" 
                       onClick={() => setShowRegPass(!showRegPass)} 
                       className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white transition-colors"
-                      title={showRegPass ? 'Hide Password' : 'Show Password'}
                     >
-                      {showRegPass ? (
-                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"></path></svg>
-                      ) : (
-                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
-                      )}
+                      {showRegPass ? "HIDE" : "SHOW"}
                     </button>
                 </div>
 
-                <div className="flex items-center gap-2">
-                   <button 
-                      type="button" 
-                      onClick={() => setSavePassword(!savePassword)} 
-                      className={`w-5 h-5 rounded border flex items-center justify-center transition-all ${savePassword ? 'bg-[#00ff88] border-[#00ff88]' : 'bg-transparent border-gray-600 hover:border-gray-400'}`}
-                    >
-                       {savePassword && <svg className="w-3 h-3 text-black" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="4" d="M5 13l4 4L19 7"></path></svg>}
-                    </button>
-                    <span className="text-[9px] font-black text-gray-500 uppercase tracking-widest cursor-pointer select-none" onClick={() => setSavePassword(!savePassword)}>Save Password</span>
-                </div>
-
-                <input type="text" value={regInvite} onChange={e => { setRegInvite(e.target.value); playTypingSound(); }} className="w-full bg-black/40 border border-white/10 rounded-lg px-4 py-3 outline-none font-bold" placeholder="Invite Code" />
+                <input 
+                    type="text" 
+                    value={regInvite} 
+                    onChange={e => { setRegInvite(e.target.value); playTypingSound(); }} 
+                    className={`w-full bg-black/40 border rounded-lg px-4 py-3 outline-none font-bold transition-colors ${!hasAdmin ? 'border-[#00ff88]/50 text-[#00ff88]' : 'border-white/10'}`} 
+                    placeholder={!hasAdmin ? "No Code Needed (Become Admin)" : "Invite Code"} 
+                />
                 <button type="submit" className="w-full border border-[#00ff88] text-[#00ff88] font-black py-3 rounded-lg hover:bg-[#00ff88]/10 transition-all italic">CLAIM SEAT</button>
               </form>
             </div>
@@ -371,26 +496,42 @@ const App: React.FC = () => {
   }
 
   const renderContent = () => {
+    // SUSPENSE WRAPPER FOR LAZY COMPONENTS
+    const SuspenseLoader = () => (
+        <div className="h-64 flex flex-col items-center justify-center text-gray-500">
+            <div className="loader mb-4"></div>
+            <p className="text-xs font-black uppercase tracking-widest">Loading Component...</p>
+        </div>
+    );
+
     if (selectedTournament) {
       return (
-        <TournamentDetail 
-          tournament={selectedTournament} 
-          currentUser={user} 
-          onBack={() => { setSelectedTournament(null); setCurrentPage('tournaments'); }} 
-        />
+        <Suspense fallback={<SuspenseLoader />}>
+            <TournamentDetail 
+              tournament={selectedTournament} 
+              currentUser={user} 
+              onBack={() => { setSelectedTournament(null); setCurrentPage('tournaments'); }} 
+            />
+        </Suspense>
       );
+    }
+
+    if (dataLoading) {
+        return (
+            <div className="h-64 flex flex-col items-center justify-center text-gray-500">
+                <div className="loader mb-4"></div>
+                <p className="text-xs font-black uppercase tracking-widest">Loading Live Data...</p>
+            </div>
+        );
     }
 
     switch (currentPage) {
       case 'dashboard':
-        // 1. Fetch raw data
-        const allMatches = db.getAllMatches();
-        const allUsers = db.getUsers();
-        
         // 2. Simple Counts
         const activeCount = tournaments.filter(t => t.status === TournamentStatus.ACTIVE).length;
         const finishedCount = tournaments.filter(t => t.status === TournamentStatus.FINISHED).length;
         const totalUsers = allUsers.length;
+        // Calculation now strictly uses 'allMatches' which has been pre-filtered in loadDashboardData
         const totalGoals = allMatches.reduce((acc, m) => acc + (m.scoreA || 0) + (m.scoreB || 0), 0);
         
         // 3. Biggest Win Calculation
@@ -450,7 +591,7 @@ const App: React.FC = () => {
         let biggestWinOpponent = '';
         
         if (biggestWin) {
-          const bwMatch = biggestWin as unknown as import('./types').Match; 
+          const bwMatch = biggestWin as unknown as Match; 
           const isA = (bwMatch.scoreA || 0) > (bwMatch.scoreB || 0);
           const wId = isA ? bwMatch.playerAId : bwMatch.playerBId;
           const lId = isA ? bwMatch.playerBId : bwMatch.playerAId;
@@ -470,8 +611,8 @@ const App: React.FC = () => {
                 </h2>
                 <p className="text-gray-400 font-bold uppercase tracking-widest text-xs mt-2 flex items-center gap-2">
                    <span>Manager ID: {user.id.substring(0,8)}</span>
-                   <span className="w-1 h-1 bg-gray-600 rounded-full"></span>
-                   <span>Status: <span className="ea-accent">Online</span></span>
+                   <span className="w-1 h-1 bg-[#00ff88] rounded-full animate-pulse"></span>
+                   <span>Status: <span className="ea-accent">Cloud Connected</span></span>
                 </p>
             </div>
             
@@ -479,9 +620,6 @@ const App: React.FC = () => {
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               {/* Active Tournaments */}
               <div className="ea-card p-6 rounded-2xl border border-[#00ff88]/20 bg-gradient-to-br from-[#00ff88]/5 to-transparent relative group hover:-translate-y-1 transition-transform duration-300">
-                <div className="absolute top-4 right-4 opacity-20 group-hover:opacity-100 transition-opacity">
-                   <svg className="w-8 h-8 text-[#00ff88]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
-                </div>
                 <p className="text-[10px] font-black text-[#00ff88] uppercase tracking-widest mb-1">Active Competitions</p>
                 <p className="text-5xl font-black italic tracking-tighter text-white">{activeCount}</p>
                 <div className="w-full h-1 bg-white/5 mt-4 rounded-full overflow-hidden">
@@ -491,9 +629,6 @@ const App: React.FC = () => {
 
               {/* Total Matches */}
               <div className="ea-card p-6 rounded-2xl border border-blue-500/20 bg-gradient-to-br from-blue-500/5 to-transparent relative group hover:-translate-y-1 transition-transform duration-300">
-                <div className="absolute top-4 right-4 opacity-20 group-hover:opacity-100 transition-opacity">
-                   <svg className="w-8 h-8 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                </div>
                 <p className="text-[10px] font-black text-blue-400 uppercase tracking-widest mb-1">Total Matches</p>
                 <p className="text-5xl font-black italic tracking-tighter text-white">{allMatches.length}</p>
                 <div className="w-full h-1 bg-white/5 mt-4 rounded-full overflow-hidden">
@@ -503,18 +638,15 @@ const App: React.FC = () => {
 
               {/* Global Teams */}
               <div className="ea-card p-6 rounded-2xl border border-purple-500/20 bg-gradient-to-br from-purple-500/5 to-transparent relative group hover:-translate-y-1 transition-transform duration-300">
-                <div className="absolute top-4 right-4 opacity-20 group-hover:opacity-100 transition-opacity">
-                   <svg className="w-8 h-8 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                </div>
                 <p className="text-[10px] font-black text-purple-400 uppercase tracking-widest mb-1">Available Football Teams</p>
-                <p className="text-5xl font-black italic tracking-tighter text-white">{db.getGlobalTeams().length}</p>
+                <p className="text-5xl font-black italic tracking-tighter text-white">{globalTeamsCount}</p>
                 <div className="w-full h-1 bg-white/5 mt-4 rounded-full overflow-hidden">
                     <div className="h-full bg-purple-500 w-3/4 opacity-50"></div>
                 </div>
               </div>
             </div>
 
-            {/* Extended Stats - Visible to ALL Users */}
+            {/* Extended Stats */}
             <div className="pt-8 border-t border-white/5">
                 <h3 className="text-sm font-black italic uppercase tracking-widest text-gray-500 mb-6 flex items-center gap-2">
                     <span className="w-8 h-0.5 bg-gray-700"></span>
@@ -529,7 +661,6 @@ const App: React.FC = () => {
                             <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest">Finished Tournaments</p>
                             <p className="text-3xl font-black mt-2 italic text-gray-200">{finishedCount}</p>
                          </div>
-                         <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
                     </div>
                   </div>
 
@@ -540,7 +671,6 @@ const App: React.FC = () => {
                             <p className="text-[9px] font-black text-yellow-500 uppercase tracking-widest">Total Managers</p>
                             <p className="text-3xl font-black mt-2 italic text-yellow-500">{totalUsers}</p>
                          </div>
-                         <svg className="w-5 h-5 text-yellow-500/50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
                     </div>
                   </div>
 
@@ -551,18 +681,13 @@ const App: React.FC = () => {
                             <p className="text-[9px] font-black text-red-500 uppercase tracking-widest">Total Goals Scored</p>
                             <p className="text-3xl font-black mt-2 italic text-red-500">{totalGoals}</p>
                          </div>
-                         <svg className="w-5 h-5 text-red-500/50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
                     </div>
                   </div>
 
-                  {/* Biggest Win - Animated */}
+                  {/* Biggest Win */}
                   {biggestWin ? (
                     <div className="ea-card p-6 rounded-2xl border border-[#00ff88]/30 bg-gradient-to-br from-[#00ff88]/20 to-black relative overflow-hidden group">
-                      <div className="absolute -right-4 -top-4 text-[#00ff88] opacity-10 rotate-12 group-hover:rotate-0 transition-transform duration-500">
-                         <svg className="w-24 h-24" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 2a1 1 0 011 1v1.323l3.954 1.582 1.699-3.181a1 1 0 011.827 1.035l-1.74 3.258 2.153 3.948a1 1 0 01-1.354 1.354l-3.948-2.153-3.258 1.74a1 1 0 01-1.035-1.827L10 5.323l-3.954 1.582a1 1 0 01-1.354-1.354L10 2z" clipRule="evenodd"/><path d="M5 12a2 2 0 100-4 2 2 0 000 4zM15 12a2 2 0 100-4 2 2 0 000 4zM10 18a2 2 0 100-4 2 2 0 000 4z"/></svg>
-                      </div>
                       <p className="text-[9px] font-black text-[#00ff88] uppercase tracking-widest mb-2 flex items-center gap-1">
-                          <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"/></svg>
                           Biggest Win
                       </p>
                       <div className="relative z-10">
@@ -578,7 +703,7 @@ const App: React.FC = () => {
                   )}
                 </div>
 
-                {/* All-Time Leaderboards (Podiums) */}
+                {/* All-Time Leaderboards */}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                     <Podium 
                         title="All-Time Ranking (Top 3)" 
@@ -586,7 +711,7 @@ const App: React.FC = () => {
                         valueKey="pts" 
                         valueLabel="PTS" 
                         colorClass="green-400"
-                        icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path></svg>}
+                        icon={<span>🏆</span>}
                     />
                     
                     <Podium 
@@ -595,7 +720,7 @@ const App: React.FC = () => {
                         valueKey="gf" 
                         valueLabel="Goals" 
                         colorClass="yellow-400"
-                        icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>}
+                        icon={<span>⚽</span>}
                     />
                 </div>
             </div>
@@ -655,11 +780,11 @@ const App: React.FC = () => {
         );
 
       case 'rankings':
-        const allUsersList = db.getUsers();
-        const allMatchesList = db.getAllMatches().filter(m => m.isCompleted);
-        const rankings = allUsersList.map(u => {
+        const rankings = allUsers.map(u => {
           let pts = 0, w = 0, d = 0, l = 0, gf = 0, ga = 0;
-          allMatchesList.forEach(m => {
+          const completedMatches = allMatches.filter(m => m.isCompleted);
+          
+          completedMatches.forEach(m => {
             if (m.playerAId === u.id) {
               gf += m.scoreA!; ga += m.scoreB!;
               if (m.scoreA! > m.scoreB!) { pts += 3; w++; }
@@ -736,7 +861,9 @@ const App: React.FC = () => {
                         <span>← Back to Rankings</span>
                     </button>
                 )}
-                <PlayerProfile user={profileUser} />
+                <Suspense fallback={<SuspenseLoader />}>
+                    <PlayerProfile user={profileUser} />
+                </Suspense>
             </div>
         );
 
@@ -754,6 +881,7 @@ const App: React.FC = () => {
                   <div className={`p-4 rounded-2xl inline-block shadow-lg ${m.userId === user.id ? 'ea-bg-accent text-black font-black italic' : 'bg-white/5 border border-white/10'}`}>{m.text}</div>
                 </div>
               ))}
+              <div ref={chatEndRef} />
             </div>
             <form onSubmit={sendChatMessage} className="p-6 bg-white/5 border-t border-white/5 flex gap-4">
               <input type="text" value={chatMsg} onChange={e => setChatMsg(e.target.value)} placeholder="Broadcast strategy..." className="flex-1 bg-black/40 border border-white/10 rounded-2xl px-6 py-4 outline-none focus:border-[#00ff88] font-bold italic" />
@@ -763,7 +891,7 @@ const App: React.FC = () => {
         );
 
       case 'admin':
-        return <AdminPanel adminId={user.id} />;
+        return <Suspense fallback={<SuspenseLoader />}><AdminPanel adminId={user.id} /></Suspense>;
 
       default:
         return <div>Not Found</div>;
@@ -779,7 +907,7 @@ const App: React.FC = () => {
         setSelectedProfileUser(null);
         setCurrentPage(p); 
       }}
-      onLogout={() => { auth.logout(); setUser(null); }}
+      onLogout={() => { authService.logout(); setUser(null); }}
     >
       {renderContent()}
     </Layout>

@@ -1,7 +1,6 @@
 
-import React from 'react';
+import React, { useState } from 'react';
 import { User, UserRole } from '../types';
-import { auth } from '../services/auth';
 
 interface LayoutProps {
   user: User;
@@ -12,6 +11,8 @@ interface LayoutProps {
 }
 
 const Layout: React.FC<LayoutProps> = ({ user, onLogout, children, setCurrentPage, currentPage }) => {
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', roles: [UserRole.ADMIN, UserRole.MEMBER] },
     { id: 'tournaments', label: 'Tournaments', roles: [UserRole.ADMIN, UserRole.MEMBER] },
@@ -21,8 +22,13 @@ const Layout: React.FC<LayoutProps> = ({ user, onLogout, children, setCurrentPag
     { id: 'admin', label: 'Admin Panel', roles: [UserRole.ADMIN] },
   ];
 
+  const handleNavClick = (pageId: string) => {
+    setCurrentPage(pageId);
+    setIsMobileMenuOpen(false);
+  };
+
   return (
-    <div className="min-h-screen flex flex-col md:flex-row relative overflow-hidden">
+    <div className="min-h-screen flex flex-col md:flex-row relative overflow-hidden bg-[#0a0a0c]">
       
       {/* --- GLOBAL FOOTBALL THEMED BACKGROUND --- */}
       <div className="fixed inset-0 z-0 pointer-events-none select-none">
@@ -55,19 +61,49 @@ const Layout: React.FC<LayoutProps> = ({ user, onLogout, children, setCurrentPag
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,transparent_0%,rgba(5,5,6,0.5)_100%)]" />
       </div>
 
-      {/* Sidebar */}
-      <aside className="w-full md:w-64 bg-[#111114]/90 backdrop-blur-md border-r border-white/10 flex flex-col sticky top-0 h-auto md:h-screen z-20 relative shadow-2xl">
-        <div className="p-6">
+      {/* MOBILE HEADER */}
+      <div className="md:hidden sticky top-0 z-40 bg-[#111114]/95 backdrop-blur-xl border-b border-white/10 px-6 py-4 flex justify-between items-center shadow-2xl">
+        <h1 className="text-xl font-extrabold tracking-tighter italic">
+            FC <span className="ea-accent">26</span> PRO
+        </h1>
+        <button 
+            onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+            className="text-gray-300 hover:text-white p-2"
+        >
+            {isMobileMenuOpen ? (
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" /></svg>
+            ) : (
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 12h16M4 18h16" /></svg>
+            )}
+        </button>
+      </div>
+
+      {/* MOBILE OVERLAY */}
+      {isMobileMenuOpen && (
+          <div 
+            className="fixed inset-0 bg-black/80 z-30 md:hidden backdrop-blur-sm"
+            onClick={() => setIsMobileMenuOpen(false)}
+          />
+      )}
+
+      {/* SIDEBAR (Responsive Drawer) */}
+      <aside className={`
+        fixed inset-y-0 left-0 z-40 w-64 bg-[#111114]/95 backdrop-blur-md border-r border-white/10 flex flex-col shadow-2xl
+        transform transition-transform duration-300 ease-in-out
+        ${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'}
+        md:translate-x-0 md:static md:h-screen
+      `}>
+        <div className="p-6 hidden md:block">
           <h1 className="text-xl font-extrabold tracking-tighter italic">
             FC <span className="ea-accent">26</span> PRO
           </h1>
         </div>
 
-        <nav className="flex-1 px-4 space-y-2">
+        <nav className="flex-1 px-4 space-y-2 mt-4 md:mt-0">
           {navItems.map(item => item.roles.includes(user.role) && (
             <button
               key={item.id}
-              onClick={() => setCurrentPage(item.id)}
+              onClick={() => handleNavClick(item.id)}
               className={`w-full text-left px-4 py-3 rounded-lg transition-all duration-200 font-medium ${
                 currentPage === item.id 
                   ? 'ea-bg-accent text-black shadow-lg shadow-[#00ff88]/20' 
@@ -99,8 +135,8 @@ const Layout: React.FC<LayoutProps> = ({ user, onLogout, children, setCurrentPag
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 p-6 md:p-10 overflow-y-auto z-10 relative">
-        <div className="max-w-6xl mx-auto animate-fade-in">
+      <main className="flex-1 p-6 md:p-10 overflow-y-auto z-10 relative h-[calc(100vh-64px)] md:h-screen">
+        <div className="max-w-6xl mx-auto animate-fade-in pb-20 md:pb-0">
           {children}
         </div>
       </main>

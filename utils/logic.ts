@@ -36,8 +36,9 @@ export const generateFixturesAlgorithm = (
           matchday: round + 1,
           playerAId: playerA, 
           playerBId: playerB,
-          teamAId: teamA,
-          teamBId: teamB,
+          // Conditionally add teams only if defined to avoid 'undefined' values
+          ...(teamA ? { teamAId: teamA } : {}),
+          ...(teamB ? { teamBId: teamB } : {}),
           scoreA: null, 
           scoreB: null, 
           isCompleted: false
@@ -49,13 +50,14 @@ export const generateFixturesAlgorithm = (
   }
 
   const secondHalf = firstHalf.map(m => ({
-    ...m, 
     id: Math.random().toString(36).substr(2, 9), 
+    tournamentId: m.tournamentId,
     matchday: m.matchday + rounds,
     playerAId: m.playerBId, 
     playerBId: m.playerAId, 
-    teamAId: m.teamBId, 
-    teamBId: m.teamAId,
+    // Swap teams and ensure no undefined values
+    ...(m.teamBId ? { teamAId: m.teamBId } : {}),
+    ...(m.teamAId ? { teamBId: m.teamAId } : {}),
     scoreA: null,
     scoreB: null,
     isCompleted: false

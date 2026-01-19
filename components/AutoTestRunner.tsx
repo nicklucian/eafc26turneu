@@ -23,13 +23,13 @@ export const AutoTestRunner: React.FC<{ onClose: () => void }> = ({ onClose }) =
       // 1. SETUP
       const testKey = 'fc26_autotest_temp';
       localStorage.removeItem(testKey); // Ensure clean state
-      const db = new DatabaseService(testKey);
+      const db = new DatabaseService();
       
       addLog('✓ Test Database Instantiated (Isolated)');
 
       // 2. ADMIN & SETUP TESTS
-      db.seedTestUsers();
-      const users = db.getUsers();
+      await db.seedTestUsers();
+      const users = await db.getUsers();
       if (users.length < 6) throw new Error('Seeding failed');
       addLog('✓ User Seeding Verified');
 
@@ -38,7 +38,7 @@ export const AutoTestRunner: React.FC<{ onClose: () => void }> = ({ onClose }) =
 
       // Create Tournament
       const tId = 'test-tourn-1';
-      db.addTournament({
+      await db.addTournament({
         id: tId,
         name: 'AutoTest Cup',
         type: TournamentType.USERS_ONLY, // Easier setup for auto test
@@ -53,9 +53,9 @@ export const AutoTestRunner: React.FC<{ onClose: () => void }> = ({ onClose }) =
       // Add Participants
       const p1 = users[1].id; // TestPlayer_One
       const p2 = users[2].id; // TestPlayer_Two
-      db.updateTournamentParticipants(tId, [p1, p2]);
+      await db.updateTournamentParticipants(tId, [p1, p2]);
       
-      const tAfterAdd = db.getTournamentById(tId);
+      const tAfterAdd = await db.getTournamentById(tId);
       if (tAfterAdd?.participantUserIds.length !== 2) throw new Error('Participant addition failed');
       addLog('✓ Participant Management Verified');
 
@@ -63,9 +63,9 @@ export const AutoTestRunner: React.FC<{ onClose: () => void }> = ({ onClose }) =
       const matches = generateFixturesAlgorithm(tId, [p1, p2], [], true);
       if (matches.length !== 2) throw new Error(`Fixture generation failed for 2 players. Expected 2, got ${matches.length}`);
       
-      db.deployFixtures(tId, matches);
-      const dbMatches = db.getMatches(tId);
-      const tActive = db.getTournamentById(tId);
+      await db.deployFixtures(tId, matches);
+      const dbMatches = await db.getMatches(tId);
+      const tActive = await db.getTournamentById(tId);
       
       if (tActive?.status !== TournamentStatus.ACTIVE) throw new Error('Tournament status not updated to ACTIVE');
       if (dbMatches.length !== 2) throw new Error('Matches not saved to DB');
@@ -79,39 +79,39 @@ export const AutoTestRunner: React.FC<{ onClose: () => void }> = ({ onClose }) =
       const sA = m1.playerAId === p1 ? 2 : 1; 
       const sB = m1.playerBId === p1 ? 2 : 1;
 
-      db.updateMatch(m1.id, sA, sB); // P1 beats P2
+      await db.updateMatch(m1.id, sA, sB); // P1 beats P2
       
-      let updatedMatch = db.getMatches(tId).find(m => m.id === m1.id);
+      let updatedMatch = (await db.getMatches(tId)).find(m => m.id === m1.id);
       if (updatedMatch?.scoreA !== sA || updatedMatch?.scoreB !== sB || !updatedMatch.isCompleted) {
         throw new Error('Match update failed');
       }
       addLog('✓ Score Updates Verified');
 
       // Standings Check
-      const standings = calculateStandingsLogic([p1, p2], db.getMatches(tId), users, [], [], true);
+      const standings = calculateStandingsLogic([p1, p2], await db.getMatches(tId), users, [], [], true);
       if (standings[0].id !== p1 || standings[0].pts !== 3) throw new Error(`Standings calculation incorrect. Expected P1 (3pts), got ${standings[0].username} (${standings[0].pts}pts)`);
       if (standings[1].id !== p2 || standings[1].pts !== 0) throw new Error('Standings calculation incorrect (Loss should be 0pts)');
       addLog('✓ Standings Calculation Logic Verified');
 
       // 5. UNDO OPERATIONS
-      db.undoMatchResult(m1.id);
-      updatedMatch = db.getMatches(tId).find(m => m.id === m1.id);
+      await db.undoMatchResult(m1.id);
+      updatedMatch = (await db.getMatches(tId)).find(m => m.id === m1.id);
       if (updatedMatch?.isCompleted) throw new Error('Undo failed: isCompleted is still true');
       addLog('✓ Undo Logic Verified');
 
       // Re-apply score for finish
       // Setup a draw for m1, and P2 winning m2 for variety
-      db.updateMatch(m1.id, 1, 1); 
+      await db.updateMatch(m1.id, 1, 1); 
       
       const m2 = dbMatches[1];
       // P2 wins match 2
       const m2sA = m2.playerAId === p2 ? 2 : 0;
       const m2sB = m2.playerBId === p2 ? 2 : 0;
-      db.updateMatch(m2.id, m2sA, m2sB); 
+      await db.updateMatch(m2.id, m2sA, m2sB); 
 
       // 6. FINISH TOURNAMENT
-      db.updateTournamentStatus(tId, TournamentStatus.FINISHED);
-      const tFinished = db.getTournamentById(tId);
+      await db.updateTournamentStatus(tId, TournamentStatus.FINISHED);
+      const tFinished = await db.getTournamentById(tId);
       if (tFinished?.status !== TournamentStatus.FINISHED) throw new Error('Finish status update failed');
       addLog('✓ Finish Tournament Workflow Verified');
 
@@ -121,7 +121,7 @@ export const AutoTestRunner: React.FC<{ onClose: () => void }> = ({ onClose }) =
       // We verify the DB *can* still accept valid input, proving we rely on UI/Controller logic.
       // However, let's verify invalid inputs are rejected.
       try {
-        db.updateMatch(m1.id, -1, 0);
+        await db.updateMatch(m1.id, -1, 0);
         throw new Error('DB accepted negative score');
       } catch (e: any) {
         if (!e.message.includes('non-negative')) throw e;
@@ -129,21 +129,22 @@ export const AutoTestRunner: React.FC<{ onClose: () => void }> = ({ onClose }) =
       addLog('✓ Data Integrity: Negative scores rejected');
 
       try {
-        db.updateMatch('invalid-id', 1, 0);
+        await db.updateMatch('invalid-id', 1, 0);
         throw new Error('DB accepted invalid match ID');
       } catch (e: any) {
-         if (!e.message.includes('not found')) throw e;
+         // Accept 'not found' OR 'No document to update'
+         if (!e.message.includes('not found') && !e.message.includes('No document to update')) throw e;
       }
       addLog('✓ Data Integrity: Invalid IDs rejected');
 
       // 8. CASCADE DELETION
-      db.deleteTournament(tId);
-      if (db.getTournamentById(tId)) throw new Error('Tournament deletion failed');
-      if (db.getMatches(tId).length > 0) throw new Error('Cascade delete failed (Matches remained)');
+      await db.deleteTournament(tId);
+      if (await db.getTournamentById(tId)) throw new Error('Tournament deletion failed');
+      if ((await db.getMatches(tId)).length > 0) throw new Error('Cascade delete failed (Matches remained)');
       addLog('✓ Cascade Deletion Verified');
 
       // 9. AUDIT LOGS
-      if (db.getAuditLogs().length === 0) throw new Error('Audit logs are empty');
+      if ((await db.getAuditLogs()).length === 0) throw new Error('Audit logs are empty');
       addLog('✓ Audit Logging Verified');
 
       // Cleanup

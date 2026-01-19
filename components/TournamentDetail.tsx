@@ -1,8 +1,8 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import confetti from 'canvas-confetti';
-import { db } from '../services/db';
-import { Tournament, GlobalTeam, Assignment, User, Match, TournamentStatus, TournamentType, UserRole } from '../types';
+import { databaseService } from '../services/db';
+import { Tournament, GlobalTeam, Assignment, User, Match, TournamentStatus, TournamentType, UserRole, TeamType } from '../types';
 import { generateFixturesAlgorithm, calculateStandingsLogic } from '../utils/logic';
 
 interface Props {
@@ -38,29 +38,31 @@ const MatchInputGroup: React.FC<{
   };
 
   return (
-    <div className="flex items-center gap-4 bg-black/80 p-3 rounded-3xl border border-white/10 shadow-2xl animate-fade-in">
-      <input 
-        type="text" 
-        inputMode="numeric" 
-        value={a} 
-        onChange={e => handleChange(e.target.value, setA)} 
-        className="w-16 bg-transparent text-center font-black text-3xl text-white outline-none border-b-2 border-white/10 focus:border-[#00ff88] placeholder-gray-600" 
-        placeholder="0" 
-      />
-      <span className="text-gray-800 font-black italic text-xl">VS</span>
-      <input 
-        type="text" 
-        inputMode="numeric" 
-        value={b} 
-        onChange={e => handleChange(e.target.value, setB)} 
-        className="w-16 bg-transparent text-center font-black text-3xl text-white outline-none border-b-2 border-white/10 focus:border-[#00ff88] placeholder-gray-600" 
-        placeholder="0" 
-      />
+    <div className="flex flex-col sm:flex-row items-center gap-4 bg-black/80 p-4 rounded-3xl border border-white/10 shadow-2xl animate-fade-in w-full sm:w-auto">
+      <div className="flex items-center gap-4">
+        <input 
+            type="text" 
+            inputMode="numeric" 
+            value={a} 
+            onChange={e => handleChange(e.target.value, setA)} 
+            className="w-16 bg-transparent text-center font-black text-3xl text-white outline-none border-b-2 border-white/10 focus:border-[#00ff88] placeholder-gray-600" 
+            placeholder="0" 
+        />
+        <span className="text-gray-800 font-black italic text-xl">VS</span>
+        <input 
+            type="text" 
+            inputMode="numeric" 
+            value={b} 
+            onChange={e => handleChange(e.target.value, setB)} 
+            className="w-16 bg-transparent text-center font-black text-3xl text-white outline-none border-b-2 border-white/10 focus:border-[#00ff88] placeholder-gray-600" 
+            placeholder="0" 
+        />
+      </div>
       <button 
         onClick={handleSave} 
-        className="ea-bg-accent text-black font-black px-6 py-2.5 rounded-2xl text-[10px] uppercase italic hover:scale-105 active:scale-95 transition-all shadow-[0_10px_20px_rgba(0,255,136,0.3)]"
+        className="w-full sm:w-auto ea-bg-accent text-black font-black px-6 py-2.5 rounded-2xl text-[10px] uppercase italic hover:scale-105 active:scale-95 transition-all shadow-[0_10px_20px_rgba(0,255,136,0.3)]"
       >
-        SET
+        SET RESULT
       </button>
     </div>
   );
@@ -71,6 +73,7 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [matches, setMatches] = useState<Match[]>([]);
   const [allSystemUsers, setAllSystemUsers] = useState<User[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
   
   const [showTeamPicker, setShowTeamPicker] = useState<{userId: string} | null>(null);
   const [activeTab, setActiveTab] = useState<'info' | 'standings' | 'matches' | 'admin'>('info');
@@ -85,19 +88,32 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
     refreshData();
   }, [tournament.id]);
 
-  const refreshData = () => {
-    const updatedTournament = db.getTournamentById(tournament.id);
-    if (!updatedTournament) {
-        onBack();
-        return;
+  const refreshData = async () => {
+    // Keep loading state mostly for first load
+    try {
+      const updatedTournament = await databaseService.getTournamentById(tournament.id);
+      if (!updatedTournament) {
+          onBack();
+          return;
+      }
+      
+      const [teams, assigns, usrs, matchArr] = await Promise.all([
+        databaseService.getGlobalTeams(),
+        databaseService.getAssignments(tournament.id),
+        databaseService.getUsers(),
+        databaseService.getMatches(tournament.id)
+      ]);
+
+      setLocalTournament(updatedTournament);
+      setGlobalTeams(teams);
+      setAssignments(assigns);
+      setAllSystemUsers(usrs);
+      setMatches(matchArr);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsLoading(false);
     }
-    
-    setLocalTournament(updatedTournament);
-    setGlobalTeams(db.getGlobalTeams() || []);
-    setAssignments(db.getAssignments(tournament.id) || []);
-    setAllSystemUsers(db.getUsers() || []);
-    const freshMatches = db.getMatches(tournament.id) || [];
-    setMatches(freshMatches);
   };
 
   const progressStats = useMemo(() => {
@@ -117,7 +133,7 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
     });
   };
 
-  const handleFinishTournament = (e?: React.MouseEvent) => {
+  const handleFinishTournament = async (e?: React.MouseEvent) => {
     if (e) {
       e.preventDefault();
       e.stopPropagation();
@@ -125,9 +141,9 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
     if (!isAdmin || progressStats.percent < 100 || localTournament.status !== TournamentStatus.ACTIVE) return;
     setIsFinishing(true);
     try {
-        db.updateTournamentStatus(localTournament.id, TournamentStatus.FINISHED);
-        db.log(currentUser.id, 'TOURNAMENT_FINISHED', `Tournament ${localTournament.name} officially concluded.`);
-        refreshData();
+        await databaseService.updateTournamentStatus(localTournament.id, TournamentStatus.FINISHED);
+        await databaseService.log(currentUser.id, 'TOURNAMENT_FINISHED', `Tournament ${localTournament.name} officially concluded.`);
+        await refreshData();
         setActiveTab('standings');
     } catch (err) {
         console.error("Finishing error:", err);
@@ -139,25 +155,25 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
 
   const isFinished = localTournament.status === TournamentStatus.FINISHED;
 
-  const handleSaveScore = (matchId: string, sA: number, sB: number) => {
+  const handleSaveScore = async (matchId: string, sA: number, sB: number) => {
     if (!isAdmin || isFinished) return;
     try {
-      db.updateMatch(matchId, sA, sB);
-      db.log(currentUser.id, 'RESULT_POSTED', `Match result finalized for ${matchId}`);
-      refreshData();
+      await databaseService.updateMatch(matchId, sA, sB);
+      await databaseService.log(currentUser.id, 'RESULT_POSTED', `Match result finalized for ${matchId}`);
+      await refreshData();
     } catch (err: any) {
       alert(`Save Failed: ${err.message}`);
     }
   };
 
-  const handleUndoResult = (e: React.MouseEvent, matchId: string) => {
+  const handleUndoResult = async (e: React.MouseEvent, matchId: string) => {
     e.preventDefault();
     e.stopPropagation(); 
     if (!isAdmin || isFinished) return;
     try {
-      db.undoMatchResult(matchId);
-      db.log(currentUser.id, 'RESULT_REVERTED', `Reopened match: ${matchId}`);
-      refreshData();
+      await databaseService.undoMatchResult(matchId);
+      await databaseService.log(currentUser.id, 'RESULT_REVERTED', `Reopened match: ${matchId}`);
+      await refreshData();
     } catch (err: any) {
       alert(`Undo Failed: ${err.message}`);
     }
@@ -174,7 +190,6 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
     );
   }, [matches, localTournament.participantUserIds, allSystemUsers, assignments, globalTeams, isUsersOnly]);
 
-  // --- NEW: Previous Standings Calculation for Trend Indicators ---
   const previousStandingsMap = useMemo(() => {
     const completedMatches = matches.filter(m => m.isCompleted);
     if (completedMatches.length === 0) return {};
@@ -182,7 +197,6 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
     const currentMaxMatchday = Math.max(...completedMatches.map(m => m.matchday));
     if (currentMaxMatchday <= 1) return {};
 
-    // Get standings as they were at the END of the previous matchday
     const prevMatches = matches.filter(m => m.isCompleted && m.matchday < currentMaxMatchday);
     
     const prevList = calculateStandingsLogic(
@@ -201,11 +215,10 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
     return map;
   }, [matches, localTournament, allSystemUsers, assignments, globalTeams, isUsersOnly]);
 
-  // --- NEW: Recent Form Helper ---
   const getRecentForm = (userId: string) => {
     const userMatches = matches
         .filter(m => m.isCompleted && (m.playerAId === userId || m.playerBId === userId))
-        .sort((a, b) => b.matchday - a.matchday); // Newest first
+        .sort((a, b) => b.matchday - a.matchday);
 
     return userMatches.slice(0, 5).map(m => {
         const isA = m.playerAId === userId;
@@ -226,7 +239,7 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
     return groups;
   }, [matches]);
 
-  const generateFixtures = () => {
+  const generateFixtures = async () => {
     if (isFinished) return;
     const players = [...(localTournament.participantUserIds || [])];
     if (players.length < 2) return alert('Need at least 2 managers.');
@@ -239,12 +252,12 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
 
     triggerConfetti();
 
-    db.deployFixtures(localTournament.id, fixtures);
-    db.log(currentUser.id, 'FIXTURES_ACTIVE', `${localTournament.name} schedule live.`);
-    refreshData();
+    await databaseService.deployFixtures(localTournament.id, fixtures);
+    await databaseService.log(currentUser.id, 'FIXTURES_ACTIVE', `${localTournament.name} schedule live.`);
+    await refreshData();
   };
 
-  const runLottery = () => {
+  const runLottery = async () => {
     if (localTournament.status !== TournamentStatus.UPCOMING) return;
     const participantsCount = localTournament.participantUserIds?.length || 0;
     const pool = globalTeams
@@ -255,46 +268,44 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
     
     triggerConfetti();
 
-    db.resetTournamentSchedule(localTournament.id);
+    await databaseService.resetTournamentSchedule(localTournament.id);
     const newAssignments: Assignment[] = (localTournament.participantUserIds || []).map((uid, idx) => ({
       id: Math.random().toString(36).substr(2, 9),
       tournamentId: localTournament.id,
       userId: uid,
       teamId: pool[idx].id
     }));
-    db.addAssignments(newAssignments);
-    db.log(currentUser.id, 'LOTTERY_COMMIT', `Fair-draw logic applied to ${localTournament.name}`);
-    refreshData();
+    await databaseService.addAssignments(newAssignments);
+    await databaseService.log(currentUser.id, 'LOTTERY_COMMIT', `Fair-draw logic applied to ${localTournament.name}`);
+    await refreshData();
   };
 
-  const handleManualAssign = (userId: string, teamId: string) => {
+  const handleManualAssign = async (userId: string, teamId: string) => {
     if (localTournament.status !== TournamentStatus.UPCOMING) return;
     const existing = assignments.filter(a => a.userId !== userId);
-    db.addAssignments([...existing, {
+    await databaseService.addAssignments([...existing, {
       id: Math.random().toString(36).substr(2, 9),
       tournamentId: localTournament.id,
       userId,
       teamId
     }]);
     setShowTeamPicker(null);
-    refreshData();
+    await refreshData();
   };
 
-  const toggleParticipant = (userId: string) => {
+  const toggleParticipant = async (userId: string) => {
     if (localTournament.status !== TournamentStatus.UPCOMING) return;
     let current = [...(localTournament.participantUserIds || [])];
     if (current.includes(userId)) {
       current = current.filter(id => id !== userId);
-      const remainingAssignments = assignments.filter(a => a.userId !== userId);
-      db.addAssignments(remainingAssignments);
     } else {
       current.push(userId);
     }
-    db.updateTournamentParticipants(localTournament.id, current);
-    refreshData();
+    await databaseService.updateTournamentParticipants(localTournament.id, current);
+    await refreshData();
   };
 
-  const toggleTeamInPool = (teamId: string) => {
+  const toggleTeamInPool = async (teamId: string) => {
     if (localTournament.status !== TournamentStatus.UPCOMING) return;
     let current = [...(localTournament.selectedTeamIds || [])];
     if (current.includes(teamId)) {
@@ -302,8 +313,8 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
     } else {
       current.push(teamId);
     }
-    db.updateTournamentTeams(localTournament.id, current);
-    refreshData();
+    await databaseService.updateTournamentTeams(localTournament.id, current);
+    await refreshData();
   };
 
   const canDeploy = useMemo(() => {
@@ -311,12 +322,16 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
     return count >= 2 && (isUsersOnly || assignments.length >= count) && matches.length === 0 && localTournament.status === TournamentStatus.UPCOMING;
   }, [localTournament, assignments, isUsersOnly, matches]);
 
+  if (isLoading) {
+      return <div className="p-10 text-center"><div className="loader mx-auto"></div></div>;
+  }
+
   return (
     <div className="space-y-6 pb-20">
       <header className="flex flex-col md:flex-row justify-between items-start md:items-center bg-[#1a1a1e] p-6 rounded-2xl border border-white/5 gap-4 shadow-xl">
-        <div>
+        <div className="w-full md:w-auto">
           <button onClick={onBack} className="text-[10px] font-black uppercase text-gray-500 hover:text-white transition-colors mb-2 block tracking-widest">← Return to Lobby</button>
-          <h2 className="text-4xl font-black italic tracking-tighter uppercase">{localTournament.name}</h2>
+          <h2 className="text-3xl md:text-4xl font-black italic tracking-tighter uppercase break-words">{localTournament.name}</h2>
           <div className="flex items-center gap-2 mt-2">
             <span className={`text-[9px] font-black uppercase px-2 py-1 rounded ${
                 localTournament.status === TournamentStatus.ACTIVE ? 'ea-bg-accent text-black' : 
@@ -363,7 +378,7 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
                   <button 
                       onClick={handleFinishTournament}
                       disabled={isFinishing}
-                      className="ea-bg-accent text-black font-black px-8 py-3 rounded-2xl text-[10px] uppercase italic hover:scale-105 active:scale-95 transition-all shadow-[0_10px_25px_rgba(0,255,136,0.4)]"
+                      className="ea-bg-accent text-black font-black px-8 py-3 rounded-2xl text-[10px] uppercase italic hover:scale-105 active:scale-95 transition-all shadow-[0_10px_25px_rgba(0,255,136,0.4)] w-full sm:w-auto"
                   >
                       {isFinishing ? 'FINISHING...' : 'CONCLUDE TOURNAMENT'}
                   </button>
@@ -372,11 +387,12 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
         </div>
       )}
 
+      {/* RENDER CONTENT BASED ON TABS */}
       {activeTab === 'info' && (
         <div className="grid lg:grid-cols-3 gap-8 animate-fade-in">
           <div className="lg:col-span-2 space-y-6">
             <div className="ea-card p-8 rounded-3xl border-white/5">
-              <div className="flex justify-between items-center mb-8">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 gap-4">
                 <div>
                   <h4 className="text-xl font-black italic uppercase tracking-tighter">Managers</h4>
                   <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest italic">Official Roster</p>
@@ -385,7 +401,7 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
                   <button 
                     onClick={runLottery} 
                     disabled={(localTournament.selectedTeamIds?.length || 0) < (localTournament.participantUserIds?.length || 0)}
-                    className="ea-bg-accent text-black font-black px-6 py-2 rounded-xl text-[10px] uppercase italic hover:scale-105 transition-transform disabled:opacity-20 shadow-[0_10px_20px_rgba(0,255,136,0.2)]"
+                    className="ea-bg-accent text-black font-black px-6 py-2 rounded-xl text-[10px] uppercase italic hover:scale-105 transition-transform disabled:opacity-20 shadow-[0_10px_20px_rgba(0,255,136,0.2)] w-full sm:w-auto"
                   >
                     Randomize Teams
                   </button>
@@ -398,14 +414,14 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
                   const team = globalTeams.find(t => t.id === assignment?.teamId);
                   return (
                     <div key={uid} className="flex items-center justify-between p-5 bg-black/40 border border-white/10 rounded-2xl group hover:border-[#00ff88]/20 transition-all">
-                      <div className="flex items-center gap-4">
-                        <div className="w-12 h-12 rounded-full bg-white/5 border border-white/10 flex items-center justify-center font-black italic text-2xl text-[#00ff88]">{u?.username[0].toUpperCase() || '?'}</div>
-                        <div>
-                          <span className="font-black italic text-xl tracking-tight block">{u?.username || 'Unknown'}</span>
+                      <div className="flex items-center gap-4 min-w-0">
+                        <div className="w-12 h-12 rounded-full bg-white/5 border border-white/10 flex items-center justify-center font-black italic text-2xl text-[#00ff88] flex-shrink-0">{u?.username[0].toUpperCase() || '?'}</div>
+                        <div className="min-w-0">
+                          <span className="font-black italic text-xl tracking-tight block truncate">{u?.username || 'Unknown'}</span>
                           {!isUsersOnly && (
                             <div className="mt-1 flex items-center gap-2">
                                 {team ? (
-                                    <span className="text-[10px] font-black uppercase ea-accent tracking-widest">{team.name}</span>
+                                    <span className="text-[10px] font-black uppercase ea-accent tracking-widest truncate">{team.name}</span>
                                 ) : (
                                     <span className="text-[10px] font-black uppercase text-gray-700 italic">Unassigned</span>
                                 )}
@@ -433,7 +449,7 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     {allSystemUsers.filter(u => !localTournament.participantUserIds?.includes(u.id)).map(u => (
                       <button key={u.id} onClick={() => toggleParticipant(u.id)} className="flex items-center justify-between p-4 bg-white/5 border border-white/5 rounded-2xl hover:border-[#00ff88]/50 hover:bg-[#00ff88]/5 transition-all group">
-                        <span className="font-black italic text-gray-500 group-hover:text-white transition-colors">{u.username}</span>
+                        <span className="font-black italic text-gray-500 group-hover:text-white transition-colors truncate">{u.username}</span>
                         <span className="text-[10px] font-black uppercase text-[#00ff88]">Add +</span>
                       </button>
                     ))}
@@ -534,7 +550,6 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
                       rowClasses += `border-transparent hover:bg-white/5 ${isCurrentUser ? 'bg-white/[0.02]' : ''}`;
                   }
 
-                  // Trend Arrow
                   let trendArrow = <span className="text-gray-700 w-3 inline-block text-center">-</span>;
                   if (prevRank) {
                     if (prevRank > rank) trendArrow = <span className="text-[#00ff88] animate-pulse">▲</span>;
@@ -550,11 +565,10 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
                       <td className="py-6 px-6">
                         <div className="flex flex-col gap-1">
                             <div className="flex items-center gap-2">
-                                <span className={`font-black italic text-xl tracking-tighter uppercase ${isCurrentUser ? 'text-[#00ff88]' : 'text-white'}`}>
+                                <span className={`font-black italic text-xl tracking-tighter uppercase truncate max-w-[150px] sm:max-w-none pr-2 ${isCurrentUser ? 'text-[#00ff88]' : 'text-white'}`}>
                                     {s.username} {rankIndicator}
                                 </span>
-                                {/* Form Stars */}
-                                <div className="flex gap-1 ml-2">
+                                <div className="hidden sm:flex gap-1 ml-2">
                                     {form.map((res, i) => (
                                         <div key={i} className={`w-2 h-2 rounded-full ${
                                             res === 'W' ? 'bg-[#00ff88] shadow-[0_0_5px_#00ff88]' : 
@@ -565,7 +579,7 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
                                 </div>
                             </div>
                             {!isUsersOnly && (
-                                <p className="text-[9px] font-black uppercase text-gray-500">
+                                <p className="text-[9px] font-black uppercase text-gray-500 truncate max-w-[120px]">
                                     {globalTeams.find(t => t.id === assignments.find(a => a.userId === s.id)?.teamId)?.name || 'UNASSIGNED'}
                                 </p>
                             )}
@@ -590,7 +604,7 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
 
       {activeTab === 'matches' && (
         <div className="space-y-10 animate-fade-in">
-          {Object.entries(groupedMatches).sort(([a],[b]) => parseInt(a) - parseInt(b)).map(([day, dayMatches]) => (
+          {Object.entries(groupedMatches).sort(([a],[b]) => parseInt(a) - parseInt(b)).map(([day, dayMatches]: [string, Match[]]) => (
             <div key={day} className="space-y-6">
               <div className="flex items-center gap-6">
                 <span className={`text-[12px] font-black uppercase px-5 py-1.5 rounded-sm italic tracking-tighter shadow-xl ${isFinished ? 'bg-gray-800 text-gray-400' : 'bg-[#00ff88] text-black shadow-[#00ff88]/10'}`}>Matchday {day}</span>
@@ -605,38 +619,43 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
                   const isEditing = isAdmin && !isFinished && !m.isCompleted;
 
                   return (
-                    <div key={m.id} className={`ea-card p-6 rounded-3xl flex flex-col sm:flex-row items-center justify-between border-white/5 group transition-all gap-6 sm:gap-0 ${isFinished ? 'opacity-80' : 'hover:border-[#00ff88]/40'}`}>
-                      <div className="flex-1 text-center sm:text-right min-w-0 sm:pr-12 md:pr-16">
-                        <p className="font-black italic text-2xl truncate tracking-tighter uppercase pr-1">{uA?.username || 'Unknown'}</p>
-                        {!isUsersOnly && teamAName && <p className="text-[10px] text-gray-500 uppercase font-black tracking-widest mt-1 mr-1">{teamAName}</p>}
-                      </div>
+                    <div key={m.id} className={`ea-card p-6 rounded-3xl flex flex-col items-center justify-between border-white/5 group transition-all relative overflow-hidden ${isFinished ? 'opacity-80' : 'hover:border-[#00ff88]/40'}`}>
                       
-                      <div className="flex flex-col items-center">
-                        {isEditing ? (
-                          <MatchInputGroup key={`edit-${m.id}`} match={m} onSave={handleSaveScore} />
-                        ) : (
-                          <div className="flex flex-col items-center relative">
-                            <div className={`flex items-center gap-10 px-12 py-5 rounded-[2.5rem] border shadow-inner relative group/score ${isFinished ? 'bg-white/5 border-white/5' : 'bg-black/50 border-white/10'}`}>
-                              <span className={`text-6xl font-black italic tracking-tighter ${m.scoreA !== null && m.scoreA > (m.scoreB || 0) ? (isFinished ? 'text-white' : 'ea-accent') : 'text-gray-500'}`}>{m.scoreA ?? '-'}</span>
-                              <span className="text-gray-900 font-black text-3xl italic">:</span>
-                              <span className={`text-6xl font-black italic tracking-tighter ${m.scoreB !== null && m.scoreB > (m.scoreA || 0) ? (isFinished ? 'text-white' : 'ea-accent') : 'text-gray-500'}`}>{m.scoreB ?? '-'}</span>
-                              {m.isCompleted && <div className={`absolute -top-3 left-1/2 -translate-x-1/2 border px-3 py-0.5 rounded-full text-[8px] font-black uppercase tracking-widest ${isFinished ? 'bg-gray-800 text-gray-400 border-gray-700' : 'bg-[#00ff88]/10 text-[#00ff88] border-[#00ff88]/20'}`}>Final</div>}
-                            </div>
-                            {isAdmin && m.isCompleted && !isFinished && (
-                              <button 
-                                onClick={(e) => handleUndoResult(e, m.id)} 
-                                className="text-[10px] font-black uppercase text-gray-700 hover:text-[#00ff88] transition-colors mt-4 italic tracking-widest cursor-pointer z-10 block w-full text-center relative hover:scale-105 active:scale-95"
-                              >
-                                Re-edit Result
-                              </button>
+                      {/* Match Row Flex Container */}
+                      <div className="flex flex-col sm:flex-row items-center w-full justify-between gap-6 sm:gap-0 relative z-10">
+                          <div className="flex-1 text-center sm:text-right min-w-0 sm:pr-12 md:pr-16 w-full">
+                            <p className="font-black italic text-2xl truncate tracking-tighter uppercase pr-1">{uA?.username || 'Unknown'}</p>
+                            {!isUsersOnly && teamAName && <p className="text-[10px] text-gray-500 uppercase font-black tracking-widest mt-1 mr-1">{teamAName}</p>}
+                          </div>
+                          
+                          <div className="flex flex-col items-center w-full sm:w-auto">
+                            {isEditing ? (
+                              <MatchInputGroup key={`edit-${m.id}`} match={m} onSave={handleSaveScore} />
+                            ) : (
+                              <div className="flex flex-col items-center relative">
+                                <div className={`flex items-center gap-10 px-12 py-5 rounded-[2.5rem] border shadow-inner relative group/score ${isFinished ? 'bg-white/5 border-white/5' : 'bg-black/50 border-white/10'}`}>
+                                  <span className={`text-6xl font-black italic tracking-tighter ${m.scoreA !== null && m.scoreA > (m.scoreB || 0) ? (isFinished ? 'text-white' : 'ea-accent') : 'text-gray-500'}`}>{m.scoreA ?? '-'}</span>
+                                  <span className="text-gray-900 font-black text-3xl italic">:</span>
+                                  <span className={`text-6xl font-black italic tracking-tighter ${m.scoreB !== null && m.scoreB > (m.scoreA || 0) ? (isFinished ? 'text-white' : 'ea-accent') : 'text-gray-500'}`}>{m.scoreB ?? '-'}</span>
+                                  {m.isCompleted && <div className={`absolute -top-3 left-1/2 -translate-x-1/2 border px-3 py-0.5 rounded-full text-[8px] font-black uppercase tracking-widest ${isFinished ? 'bg-gray-800 text-gray-400 border-gray-700' : 'bg-[#00ff88]/10 text-[#00ff88] border-[#00ff88]/20'}`}>Final</div>}
+                                </div>
+                                
+                                {isAdmin && m.isCompleted && !isFinished && (
+                                  <button 
+                                    onClick={(e) => handleUndoResult(e, m.id)} 
+                                    className="text-[10px] font-black uppercase text-gray-700 hover:text-[#00ff88] transition-colors mt-4 italic tracking-widest cursor-pointer z-10 block w-full text-center relative hover:scale-105 active:scale-95"
+                                  >
+                                    Re-edit Result
+                                  </button>
+                                )}
+                              </div>
                             )}
                           </div>
-                        )}
-                      </div>
 
-                      <div className="flex-1 text-center sm:text-left min-w-0 sm:pl-12 md:pl-16">
-                        <p className="font-black italic text-2xl truncate tracking-tighter uppercase pr-1">{uB?.username || 'Unknown'}</p>
-                        {!isUsersOnly && teamBName && <p className="text-[10px] text-gray-500 uppercase font-black tracking-widest mt-1 ml-1">{teamBName}</p>}
+                          <div className="flex-1 text-center sm:text-left min-w-0 sm:pl-12 md:pl-16 w-full">
+                            <p className="font-black italic text-2xl truncate tracking-tighter uppercase pr-1">{uB?.username || 'Unknown'}</p>
+                            {!isUsersOnly && teamBName && <p className="text-[10px] text-gray-500 uppercase font-black tracking-widest mt-1 ml-1">{teamBName}</p>}
+                          </div>
                       </div>
                     </div>
                   );
@@ -684,7 +703,13 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
                   <h4 className="text-red-500 font-black italic uppercase mb-2">Emergency Reset</h4>
                   <p className="text-gray-500 text-[10px] font-black uppercase mb-8 tracking-widest">Wiping the schedule is irreversible and deletes all score data.</p>
                   <button 
-                    onClick={() => { if(confirm('IRREVERSIBLE: Wipe all results and reset to Upcoming state?')) { db.resetTournamentSchedule(localTournament.id); db.log(currentUser.id, 'HARD_RESET', `League reset to pre-deployment for ${localTournament.name}`); refreshData(); } }} 
+                    onClick={async () => { 
+                        if(confirm('IRREVERSIBLE: Wipe all results and reset to Upcoming state?')) { 
+                            await databaseService.resetTournamentSchedule(localTournament.id); 
+                            await databaseService.log(currentUser.id, 'HARD_RESET', `League reset to pre-deployment for ${localTournament.name}`); 
+                            await refreshData(); 
+                        } 
+                    }} 
                     className="px-12 py-4 border border-red-500/30 text-red-500 text-[11px] font-black uppercase tracking-widest rounded-2xl hover:bg-red-500 hover:text-white transition-all shadow-xl shadow-red-500/10"
                   >
                     Clear Results & Reset
@@ -707,7 +732,7 @@ const TournamentDetail: React.FC<Props> = ({ tournament, currentUser, onBack }) 
               <button onClick={() => setShowTeamPicker(null)} className="text-gray-500 hover:text-white transition-all scale-150 p-2">✕</button>
             </div>
             <div className="flex-1 overflow-y-auto pr-4 space-y-10 no-scrollbar">
-              {['CLUB', 'NATIONAL'].map(type => (
+              {[TeamType.CLUB, TeamType.NATIONAL].map(type => (
                 <div key={type} className="space-y-4">
                   <h4 className="text-xs font-black uppercase tracking-[0.2em] text-gray-600 italic">{type} ASSETS</h4>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
